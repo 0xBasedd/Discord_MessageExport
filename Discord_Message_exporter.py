@@ -37,15 +37,62 @@ import json
 import glob
 from functools import wraps
 
+# Add after imports
+RAILWAY_MODE = bool(os.getenv('RAILWAY_ENVIRONMENT'))
+if RAILWAY_MODE:
+    print("\n=== Railway Environment Details ===")
+    print(f"Python version: {sys.version}")
+    print(f"Working directory: {os.getcwd()}")
+    print(f"Available directories: {os.listdir()}")
+    print(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('PATH')]}")
+    print(f"Discord.py version: {discord.__version__}")
+    print(f"Memory: {psutil.virtual_memory()}")
+    print("================================\n")
+
+    # Additional Railway-specific checks
+    try:
+        import pwd
+        print("\n=== Railway User Details ===")
+        print(f"Current user: {pwd.getpwuid(os.getuid()).pw_name}")
+        print(f"User home: {os.path.expanduser('~')}")
+        print(f"User permissions: {oct(os.stat('.').st_mode)[-3:]}")
+        print("===========================\n")
+    except ImportError:
+        print("pwd module not available")
+
+    # Check write permissions
+    try:
+        print("\n=== Railway Write Test ===")
+        test_file = "/tmp/write_test"
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print("Write test successful")
+        print("========================\n")
+    except Exception as e:
+        print(f"Write test failed: {e}")
+        print("Attempting fallback to user directory...")
+        try:
+            test_file = os.path.expanduser("~/write_test")
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print("Fallback write test successful")
+        except Exception as e2:
+            print(f"Fallback write test failed: {e2}")
+            print("WARNING: Bot may have limited functionality")
+
 # 2. ENVIRONMENT SETUP
 def check_env_file():
     """Check if token is available"""
     token = os.getenv('DISCORD_TOKEN')
     if not token:
-        # Check if running on Railway
         if os.getenv('RAILWAY_ENVIRONMENT'):
             print("Error: Discord token not found in Railway environment!")
-            print("Please set DISCORD_TOKEN in Railway variables")
+            print("Please set DISCORD_TOKEN in Railway variables at:")
+            print("https://railway.app/project/[your-project]/variables")
+            print("Current environment:", os.environ.get('RAILWAY_ENVIRONMENT'))
+            print("Available variables:", list(os.environ.keys()))
         else:
             print("Error: Discord token not found!")
             print("Make sure DISCORD_TOKEN is set in your environment variables")
@@ -90,14 +137,55 @@ except ImportError:
     FILE_PERMISSION = 0o600
 
 # 3. DATA DIRECTORY SETUP
+class RailwayFileHandler:
+    """Handle file operations for Railway environment"""
+    @staticmethod
+    def get_writable_dir():
+        """Get a writable directory path for Railway"""
+        if not os.getenv('RAILWAY_ENVIRONMENT'):
+            return None
+            
+        # Try different possible writable locations
+        test_paths = [
+            '/tmp',
+            os.path.expanduser('~'),
+            os.getcwd(),
+            '/app/data'
+        ]
+        
+        for path in test_paths:
+            try:
+                test_file = os.path.join(path, 'write_test')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                print(f"Found writable directory: {path}")
+                return path
+            except Exception as e:
+                print(f"Cannot write to {path}: {e}")
+        
+        print("WARNING: No writable directory found!")
+        return '/tmp'  # Fallback to /tmp even if test failed
+
 class DataDirectory:
     """Manage bot data directory structure"""
     def __init__(self, base_dir: str = DATA_DIR):
-        # Use /tmp on Railway for temporary storage
         if os.getenv('RAILWAY_ENVIRONMENT'):
-            self.base_dir = '/tmp/discord_exporter'
+            writable_dir = RailwayFileHandler.get_writable_dir()
+            self.base_dir = os.path.join(writable_dir, 'discord_exporter')
+            print(f"\n=== Railway Directory Setup ===")
+            print(f"Using Railway directory: {self.base_dir}")
+            if not os.path.exists(self.base_dir):
+                try:
+                    os.makedirs(self.base_dir, exist_ok=True)
+                    print(f"Created Railway directory: {self.base_dir}")
+                except Exception as e:
+                    print(f"Error creating Railway directory: {e}")
+            print(f"Directory contents: {os.listdir(self.base_dir) if os.path.exists(self.base_dir) else 'not created'}")
+            print("==============================\n")
         else:
             self.base_dir = base_dir
+        
         self.state_dir = os.path.join(self.base_dir, "state")
         self.logs_dir = os.path.join(self.base_dir, "logs")
         self.temp_dir = os.path.join(self.base_dir, "temp")
@@ -106,10 +194,16 @@ class DataDirectory:
     def _ensure_directories(self):
         """Create directory structure with proper permissions"""
         for directory in [self.base_dir, self.state_dir, self.logs_dir, self.temp_dir]:
-            if not os.path.exists(directory):
-                os.makedirs(directory, mode=DIR_PERMISSION)
-            else:
-                os.chmod(directory, DIR_PERMISSION)
+            try:
+                if not os.path.exists(directory):
+                    os.makedirs(directory, mode=DIR_PERMISSION)
+                else:
+                    os.chmod(directory, DIR_PERMISSION)
+            except Exception as e:
+                logger.error(f"Error creating directory {directory}: {e}")
+                # On Railway, try without permissions
+                if os.getenv('RAILWAY_ENVIRONMENT'):
+                    os.makedirs(directory, exist_ok=True)
 
     def get_state_file(self, filename: str) -> str:
         """Get path for state file"""
