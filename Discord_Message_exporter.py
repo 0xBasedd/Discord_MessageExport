@@ -14,7 +14,7 @@ import functools
 import traceback
 import psutil
 import time
-from typing import Optional, Tuple, List, Literal
+from typing import Optional, Tuple, List, Literal, Any
 import aiohttp
 import logging
 from discord import app_commands
@@ -252,6 +252,7 @@ def retry_on_error(retries=3, delay=1):
 def command_cooldown(cooldown_seconds=5):
     def decorator(func):
         last_used = {}
+        @functools.wraps(func)  # This preserves the original function's signature
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
             user_id = interaction.user.id
             current_time = time.time()
@@ -460,22 +461,8 @@ async def estimate_message_count(channel: discord.TextChannel, role=None, after=
         return None
 
 # 9. BOT INITIALIZATION
-client = None
-
-# Initialize bot after all definitions
-async def initialize():
-    """Async initialization"""
-    try:
-        client = ExporterBot()
-        BotInstance.set_instance(client)
-        
-        # Initialize any async resources
-        client._session = aiohttp.ClientSession()
-        
-        return client
-    except Exception as e:
-        logger.error(f"Initialization error: {e}")
-        raise
+client = ExporterBot()  # Initialize immediately instead of setting to None
+BotInstance.set_instance(client)
 
 # 10. EVENT HANDLERS
 @client.event
@@ -968,9 +955,6 @@ signal.signal(signal.SIGTERM, signal_handler)
 # 12. RUN BOT
 if __name__ == "__main__":
     try:
-        # Initialize bot
-        client = asyncio.run(initialize())
-        
         # Set up signal handlers
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
