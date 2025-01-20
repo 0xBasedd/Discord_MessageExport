@@ -45,51 +45,46 @@ A powerful Discord bot that exports messages from channels to Excel or CSV files
 
 ### Admin Commands
 - `/cleanup` - Force cleanup of resources (Admin only)
-- `/restart` - Restart the bot (Admin only)
-
-## Export Command Options
-
-### Required Options
-- `format` - Choose between 'excel' or 'csv'
-- `channel` - Channel to export from
-- `role` - Primary role to filter by
-
-### Optional Options
-- `category` - Filter by channel category
-- `search` - Search terms in messages
-- `date_from` - Start date (YYYY-MM-DD)
-- `date_to` - End date (YYYY-MM-DD)
-- `chunk_size` - Messages per file (default: 10000)
-- `data_options` - Additional data to include (comma-separated numbers 1-6)
-
-## Example Usage
-
-### Basic Export
-```
-/export format:csv channel:#general role:@Member
-```
-
-### Advanced Export
-```
-/export format:excel channel:#announcements role:@Mod category:Important search:update date_from:2023-01-01 date_to:2023-12-31 chunk_size:5000 data_options:1,2,3
-```
+- `/restart` - Restart bot (Admin only)
 
 ## Setup
 
-1. Create a `.env` file with your bot token:
-```
-DISCORD_TOKEN=your_token_here
+### Local Development
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/Discord_Message_exporter.git
+cd Discord_Message_exporter
 ```
 
-2. Install required packages:
+2. Install requirements:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Run the bot:
+3. Create a `.env` file:
+```
+DISCORD_TOKEN=your_bot_token_here
+```
+
+4. Run the bot:
 ```bash
 python Discord_Message_exporter.py
 ```
+
+### Railway Deployment
+1. Fork this repository
+2. Create a new project on [Railway](https://railway.app/)
+3. Connect your GitHub repository
+4. Add environment variable:
+   - `DISCORD_TOKEN=your_bot_token_here`
+5. Deploy!
+
+## Required Files
+- `Discord_Message_exporter.py` - Main bot file
+- `requirements.txt` - Python dependencies
+- `railway.toml` - Railway configuration
+- `.env` - Local environment variables (not committed)
+- `.gitignore` - Git ignore rules
 
 ## Requirements
 - Python 3.8+
@@ -98,6 +93,19 @@ python Discord_Message_exporter.py
 - openpyxl
 - python-dotenv
 - psutil
+- aiohttp
+
+## Discord Setup
+1. Create a bot on [Discord Developer Portal](https://discord.com/developers/applications)
+2. Enable required intents:
+   - Message Content Intent
+   - Server Members Intent
+   - Presence Intent
+3. Invite bot to your server with required permissions:
+   - Read Messages/View Channels
+   - Send Messages
+   - Attach Files
+   - Read Message History
 
 ## Error Handling
 - Automatic retries for Discord API errors
@@ -110,6 +118,16 @@ python Discord_Message_exporter.py
 - Progress updates include visual progress bar
 - Memory usage is monitored and warnings are provided
 - Export tasks can be cancelled at any time
+
+## Support
+If you encounter any issues or need help:
+1. Check the logs for detailed error messages
+2. Use `/help` command for usage information
+3. Use `/status` to check bot health
+4. Contact the maintainer for support
+
+## License
+[Your License Here]
 
 ## Advanced Features
 
