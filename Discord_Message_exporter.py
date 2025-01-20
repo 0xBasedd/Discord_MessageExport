@@ -37,7 +37,31 @@ import json
 import glob
 from functools import wraps
 
-# Import config after other imports
+# 2. ENVIRONMENT SETUP
+def check_env_file():
+    """Check if token is available"""
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        # Check if running on Railway
+        if os.getenv('RAILWAY_ENVIRONMENT'):
+            print("Error: Discord token not found in Railway environment!")
+            print("Please set DISCORD_TOKEN in Railway variables")
+        else:
+            print("Error: Discord token not found!")
+            print("Make sure DISCORD_TOKEN is set in your environment variables")
+        sys.exit(1)
+    return token
+
+# Load environment variables (skip on Railway)
+if not os.getenv('RAILWAY_ENVIRONMENT'):
+    load_dotenv(override=True)
+
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    TOKEN = check_env_file()
+print("Token loaded successfully (token hidden for security)")
+
+# Import config after environment setup
 try:
     from config import *
 except ImportError:
@@ -65,14 +89,18 @@ except ImportError:
     DIR_PERMISSION = 0o700
     FILE_PERMISSION = 0o600
 
-# 2. DATA DIRECTORY SETUP
+# 3. DATA DIRECTORY SETUP
 class DataDirectory:
     """Manage bot data directory structure"""
     def __init__(self, base_dir: str = DATA_DIR):
-        self.base_dir = base_dir
-        self.state_dir = os.path.join(base_dir, "state")
-        self.logs_dir = os.path.join(base_dir, "logs")
-        self.temp_dir = os.path.join(base_dir, "temp")
+        # Use /tmp on Railway for temporary storage
+        if os.getenv('RAILWAY_ENVIRONMENT'):
+            self.base_dir = '/tmp/discord_exporter'
+        else:
+            self.base_dir = base_dir
+        self.state_dir = os.path.join(self.base_dir, "state")
+        self.logs_dir = os.path.join(self.base_dir, "logs")
+        self.temp_dir = os.path.join(self.base_dir, "temp")
         self._ensure_directories()
 
     def _ensure_directories(self):
@@ -167,23 +195,6 @@ cleanup_old_logs()
 
 # 3. VERSION
 VERSION = VERSION  # Using imported VERSION instead of config.VERSION
-
-# 4. ENVIRONMENT SETUP
-def check_env_file():
-    """Check if token is available"""
-    token = os.getenv('DISCORD_TOKEN')
-    if not token:
-        print("Error: Discord token not found!")
-        print("Make sure DISCORD_TOKEN is set in your environment variables")
-        sys.exit(1)
-    return token
-
-# Load environment variables
-load_dotenv(override=True)
-TOKEN = os.getenv('DISCORD_TOKEN')
-if not TOKEN:
-    TOKEN = check_env_file()
-print("Token loaded successfully (token hidden for security)")
 
 # 4. LOGGING CONFIGURATION
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
