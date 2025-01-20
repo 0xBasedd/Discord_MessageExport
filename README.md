@@ -1,4 +1,5 @@
 # Discord Message Exporter Bot
+Bot is based on the py code of Lezbrahh.
 
 A powerful Discord bot for exporting channel messages with advanced filtering and formatting options.
 
