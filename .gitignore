@@ -1,9 +1,63 @@
-# Environment variables
+# Bot-specific
+data/
+logs/
+temp/
+state/
+*.backup
+*.tmp
+discord_exporter.log
+
+# Environment
 .env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # Logs
 *.log
-discord_exporter.log
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.coverage
+.tox/
+.pytest_cache/
+htmlcov/
+
+# Don't ignore these files
+!Discord_Message_exporter.py
+!requirements.txt
+!railway.toml
+!Procfile
+!README.md
+!LICENSE
+!CONTRIBUTING.md
+
+# Virtual Environment
+venv/
+ENV/
 
 # Python
 __pycache__/
@@ -12,9 +66,7 @@ __pycache__/
 *.so
 .Python
 env/
-build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -64,19 +116,7 @@ MANIFEST
 *.manifest
 *.spec
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
 # Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
@@ -88,7 +128,6 @@ cover/
 *.pot
 
 # Django stuff:
-*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -159,15 +198,6 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -201,15 +231,3 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# Don't ignore these files
-!Discord_Message_exporter.py
-!requirements.txt
-!railway.toml
-!Procfile
-
-# Ignore these
-.env
-*.pyc
-__pycache__/
-*.log

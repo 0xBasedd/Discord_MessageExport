@@ -260,7 +260,7 @@ DEBUG=True
 
 MIT License
 
-Copyright (c) 2024 
+Copyright (c) 2024 info-infoweb
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -283,3 +283,11 @@ SOFTWARE.
 ## 🙏 Credits
 
 This Discord bot is based on the Python code created by [@lezbrahh](https://github.com/lezbrahh). The original code has been enhanced with additional features, improved error handling, and better performance optimizations.
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on how to:
+- Submit bug reports
+- Request features
+- Submit pull requests
+- Follow coding standards

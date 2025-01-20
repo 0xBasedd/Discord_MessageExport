@@ -1,3 +1,14 @@
+"""
+Discord Message Exporter Bot
+Copyright (c) 2024 info-infoweb
+Based on the Python code created by @lezbrahh
+
+This bot allows exporting Discord channel messages with advanced filtering,
+formatting, and data management capabilities.
+
+Licensed under MIT License
+"""
+
 # 1. IMPORTS
 import discord
 import os
