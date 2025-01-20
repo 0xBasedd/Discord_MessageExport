@@ -102,25 +102,25 @@ class DataDirectory:
             for directory in [self.base_dir, self.state_dir, self.logs_dir, self.temp_dir]:
                 if os.path.exists(directory):
                     current_mode = oct(os.stat(directory).st_mode)[-3:]
-                    if current_mode != '700':
+                    if current_mode != oct(DIR_PERMISSION)[-3:]:  # Compare with config value
                         logger.warning(f"Fixing permissions for {directory}")
-                        os.chmod(directory, 0o700)
+                        os.chmod(directory, DIR_PERMISSION)
 
             # Check state files
             for file in glob.glob(os.path.join(self.state_dir, '*')):
                 if os.path.isfile(file):
                     current_mode = oct(os.stat(file).st_mode)[-3:]
-                    if current_mode != '600':
+                    if current_mode != oct(FILE_PERMISSION)[-3:]:  # Compare with config value
                         logger.warning(f"Fixing permissions for {file}")
-                        os.chmod(file, 0o600)
+                        os.chmod(file, FILE_PERMISSION)
 
             # Check log files
             for file in glob.glob(os.path.join(self.logs_dir, '*')):
                 if os.path.isfile(file):
                     current_mode = oct(os.stat(file).st_mode)[-3:]
-                    if current_mode != '600':
+                    if current_mode != oct(FILE_PERMISSION)[-3:]:  # Compare with config value
                         logger.warning(f"Fixing permissions for {file}")
-                        os.chmod(file, 0o600)
+                        os.chmod(file, FILE_PERMISSION)
 
             return True
         except Exception as e:
@@ -134,12 +134,12 @@ def cleanup_old_logs():
         data_dir.cleanup_temp()  # Clean temp files first
         
         now = datetime.now()
-        log_pattern = os.path.join(data_dir.logs_dir, 'discord_exporter.log*')
+        log_pattern = os.path.join(data_dir.logs_dir, LOG_FILE + '*')  # Use config LOG_FILE
         
         for log_file in glob.glob(log_pattern):
             try:
                 mtime = datetime.fromtimestamp(os.path.getmtime(log_file))
-                if now - mtime > timedelta(days=30):
+                if now - mtime > timedelta(days=LOG_RETENTION_DAYS):  # Use config value
                     os.remove(log_file)
                     logger.info(f"Removed old log file: {log_file}")
             except Exception as e:
@@ -1229,7 +1229,8 @@ async def logs(
         await interaction.response.defer()
         
         # Read last N*2 lines (to account for filtering)
-        log_entries = tail_file('discord_exporter.log', lines * 2)
+        log_file = data_dir.get_log_file(LOG_FILE)  # Use data directory path
+        log_entries = tail_file(log_file, lines * 2)
         
         if not log_entries:
             await interaction.followup.send("❌ No log file found or file is empty")
@@ -1427,15 +1428,15 @@ if __name__ == "__main__":
 class MemoryMonitor:
     """Monitor memory usage and trigger cleanup when needed"""
     def __init__(self, 
-                 warning_threshold=MEMORY_WARNING_THRESHOLD,  # Using imported constants
+                 warning_threshold=MEMORY_WARNING_THRESHOLD,
                  critical_threshold=MEMORY_CRITICAL_THRESHOLD,
                  trend_samples=MEMORY_TREND_SAMPLES):
         self.warning_threshold = warning_threshold
         self.critical_threshold = critical_threshold
         self.last_check = time.time()
-        self.check_interval = 60  # Check every minute
+        self.check_interval = MEMORY_CHECK_INTERVAL  # Use config value
         self.trend_samples = trend_samples
-        self.memory_history = []  # Track memory usage trend
+        self.memory_history = []
 
     def check(self) -> tuple[bool, str]:
         """
@@ -1528,7 +1529,9 @@ class StateFileManager:
         """Ensure state directory exists with proper permissions"""
         directory = os.path.dirname(self.filename) or '.'
         if not os.path.exists(directory):
-            os.makedirs(directory, mode=0o700)  # Secure permissions
+            os.makedirs(directory, mode=DIR_PERMISSION)  # Use config value
+        else:
+            os.chmod(directory, DIR_PERMISSION)  # Use config value
 
     def _create_backup(self):
         """Create backup of state file"""
@@ -1557,7 +1560,7 @@ class StateFileManager:
             with open(temp_file, 'w') as f:
                 json.dump(data, f, indent=2)
             os.replace(temp_file, self.filename)  # Atomic write
-            os.chmod(self.filename, 0o600)  # Secure file permissions
+            os.chmod(self.filename, FILE_PERMISSION)  # Use config value
             return True
         except Exception as e:
             logger.error(f"Error saving state file: {e}")
@@ -1592,8 +1595,8 @@ class BotState:
         self.failed_exports = 0
         self.total_messages_processed = 0
         self.last_error = None
-        self.is_maintenance_mode = False
-        self.state_manager = StateFileManager(data_dir.get_state_file('bot_state.json'))  # Use data directory
+        self.is_maintenance_mode = MAINTENANCE_MODE  # Use config value
+        self.state_manager = StateFileManager(data_dir.get_state_file(STATE_FILE))  # Use config value
         self.load_state()
 
     def save_state(self):
