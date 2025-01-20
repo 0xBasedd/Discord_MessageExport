@@ -1,22 +1,49 @@
 # Discord Message Exporter Bot
 
-A powerful Discord bot that exports messages from channels to Excel or CSV files with extensive filtering and data collection options.
+A powerful Discord bot for exporting channel messages with advanced filtering and formatting options.
 
 ## Features
 
-### Core Features
-- Export messages to Excel (.xlsx) or CSV format
-- Multiple filtering options:
-  - Filter by one or multiple roles
-  - Filter by channel category
-  - Search within messages
-  - Date range filtering
+- Export messages to Excel or CSV format
+- Advanced filtering options (role, category, search terms, date range)
+- Additional data options (attachments, reactions, replies, edits, embeds, pins)
 - Progress tracking with visual progress bar
-- Chunked exports for large channels
-- Memory-efficient processing
-- Automatic compression for large exports
+- Memory usage monitoring
+- Automatic file chunking for large exports
+- Secure state management
+- Admin-only commands for maintenance
 
-### Data Collection Options
+## Quick Start
+
+1. Install requirements:
+```bash
+pip install -r requirements.txt
+```
+
+2. Create a `.env` file with your Discord bot token:
+```
+DISCORD_TOKEN=your_token_here
+```
+
+3. Run the bot:
+```bash
+python Discord_Message_exporter.py
+```
+
+## Commands
+
+- `/export` - Export messages with various filtering options
+- `/help` - Show detailed help information
+- `/version` - Show bot version and system info
+- `/logs` - Show recent log entries (Admin only)
+- `/detailed-stats` - Show detailed bot statistics (Admin only)
+- `/maintenance` - Toggle maintenance mode (Admin only)
+- `/cleanup` - Force cleanup of resources (Admin only)
+- `/restart` - Restart the bot (Admin only)
+
+## Data Options
+
+When exporting, you can include additional data using numbers 1-6:
 1. Attachments URLs
 2. Message Reactions
 3. Reply References
@@ -24,110 +51,31 @@ A powerful Discord bot that exports messages from channels to Excel or CSV files
 5. Message Embeds
 6. Pinned Status
 
-## Commands
+Example: Use `1,2,4` to include attachments, reactions, and edits.
 
-### Basic Commands
-- `/help` - Show detailed help information
-- `/test` - Check if bot is working
-- `/about` - Show bot information
-- `/commands` - List all available commands
-- `/version` - Show bot version and system info
+## Security Features
 
-### Export Commands
-- `/export` - Export messages with filtering options
-- `/progress` - Show current export progress
-- `/cancel` - Cancel your active exports
-- `/queue` - Show export queue status
-
-### Status Commands
-- `/status` - Show basic bot status
-- `/stats` - Show detailed statistics
-
-### Admin Commands
-- `/cleanup` - Force cleanup of resources (Admin only)
-- `/restart` - Restart bot (Admin only)
-
-## Setup
-
-### Local Development
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/Discord_Message_exporter.git
-cd Discord_Message_exporter
-```
-
-2. Install requirements:
-```bash
-pip install -r requirements.txt
-```
-
-3. Create a `.env` file:
-```
-DISCORD_TOKEN=your_bot_token_here
-```
-
-4. Run the bot:
-```bash
-python Discord_Message_exporter.py
-```
-
-### Railway Deployment
-1. Fork this repository
-2. Create a new project on [Railway](https://railway.app/)
-3. Connect your GitHub repository
-4. Add environment variable:
-   - `DISCORD_TOKEN=your_bot_token_here`
-5. Deploy!
-
-## Required Files
-- `Discord_Message_exporter.py` - Main bot file
-- `requirements.txt` - Python dependencies
-- `railway.toml` - Railway configuration
-- `.env` - Local environment variables (not committed)
-- `.gitignore` - Git ignore rules
+- Secure file permissions (700 for directories, 600 for files)
+- State file backups
+- Atomic writes for state saving
+- Memory usage monitoring
+- Rate limiting protection
+- Error handling and logging
 
 ## Requirements
+
 - Python 3.8+
 - discord.py
 - pandas
-- openpyxl
 - python-dotenv
 - psutil
 - aiohttp
-
-## Discord Setup
-1. Create a bot on [Discord Developer Portal](https://discord.com/developers/applications)
-2. Enable required intents:
-   - Message Content Intent
-   - Server Members Intent
-   - Presence Intent
-3. Invite bot to your server with required permissions:
-   - Read Messages/View Channels
-   - Send Messages
-   - Attach Files
-   - Read Message History
-
-## Error Handling
-- Automatic retries for Discord API errors
-- Memory usage monitoring
-- Graceful shutdown handling
-- Detailed error logging
-
-## Notes
-- Large exports are automatically compressed
-- Progress updates include visual progress bar
-- Memory usage is monitored and warnings are provided
-- Export tasks can be cancelled at any time
-
-## Support
-If you encounter any issues or need help:
-1. Check the logs for detailed error messages
-2. Use `/help` command for usage information
-3. Use `/status` to check bot health
-4. Contact the maintainer for support
+- openpyxl
+- typing-extensions
 
 ## License
-[Your License Here]
+
+MIT License
 
 ## Advanced Features
 
@@ -749,7 +697,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### Local Environment
 1. Create `.env` file in project root:
    ```
-   DISCORD_TOKEN=your_bot_token_here
+   DISCORD_TOKEN=your_token_here
    ```
 
 ### Railway.app Environment
@@ -802,9 +750,10 @@ railway.toml       # Build config
    discord.py>=2.0.0
    pandas>=1.3.0
    python-dotenv>=0.19.0
-   openpyxl>=3.0.0
    psutil>=5.8.0
    aiohttp>=3.8.0
+   openpyxl>=3.0.0
+   typing-extensions>=4.0.0
    ```
 
 2. **Procfile**

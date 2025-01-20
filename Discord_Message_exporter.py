@@ -14,17 +14,122 @@ import functools
 import traceback
 import psutil
 import time
-from typing import Optional, Tuple, List, Literal, Any
+from typing import Optional, Tuple, List, Literal, Any, Dict
 import aiohttp
 import logging
 from discord import app_commands
 from discord.ext import commands
 import signal
+import atexit
+from logging.handlers import RotatingFileHandler
+import json
+import glob
+from functools import wraps
 
-# 2. VERSION
+# 2. DATA DIRECTORY SETUP
+class DataDirectory:
+    """Manage bot data directory structure"""
+    def __init__(self, base_dir: str = "data"):
+        self.base_dir = base_dir
+        self.state_dir = os.path.join(base_dir, "state")
+        self.logs_dir = os.path.join(base_dir, "logs")
+        self.temp_dir = os.path.join(base_dir, "temp")
+        self._ensure_directories()
+
+    def _ensure_directories(self):
+        """Create directory structure with proper permissions"""
+        for directory in [self.base_dir, self.state_dir, self.logs_dir, self.temp_dir]:
+            if not os.path.exists(directory):
+                os.makedirs(directory, mode=0o700)  # Secure permissions
+            else:
+                os.chmod(directory, 0o700)  # Ensure proper permissions
+
+    def get_state_file(self, filename: str) -> str:
+        """Get path for state file"""
+        return os.path.join(self.state_dir, filename)
+
+    def get_log_file(self, filename: str) -> str:
+        """Get path for log file"""
+        return os.path.join(self.logs_dir, filename)
+
+    def get_temp_file(self, filename: str) -> str:
+        """Get path for temporary file"""
+        return os.path.join(self.temp_dir, filename)
+
+    def cleanup_temp(self, max_age: int = 24):
+        """Clean up old temporary files"""
+        try:
+            now = time.time()
+            for filename in os.listdir(self.temp_dir):
+                filepath = os.path.join(self.temp_dir, filename)
+                if os.path.getmtime(filepath) < now - (max_age * 3600):
+                    os.remove(filepath)
+        except Exception as e:
+            logger.error(f"Error cleaning temp directory: {e}")
+
+    def check_permissions(self):
+        """Check and fix directory permissions"""
+        try:
+            # Check base directories
+            for directory in [self.base_dir, self.state_dir, self.logs_dir, self.temp_dir]:
+                if os.path.exists(directory):
+                    current_mode = oct(os.stat(directory).st_mode)[-3:]
+                    if current_mode != '700':
+                        logger.warning(f"Fixing permissions for {directory}")
+                        os.chmod(directory, 0o700)
+
+            # Check state files
+            for file in glob.glob(os.path.join(self.state_dir, '*')):
+                if os.path.isfile(file):
+                    current_mode = oct(os.stat(file).st_mode)[-3:]
+                    if current_mode != '600':
+                        logger.warning(f"Fixing permissions for {file}")
+                        os.chmod(file, 0o600)
+
+            # Check log files
+            for file in glob.glob(os.path.join(self.logs_dir, '*')):
+                if os.path.isfile(file):
+                    current_mode = oct(os.stat(file).st_mode)[-3:]
+                    if current_mode != '600':
+                        logger.warning(f"Fixing permissions for {file}")
+                        os.chmod(file, 0o600)
+
+            return True
+        except Exception as e:
+            logger.error(f"Error checking permissions: {e}")
+            return False
+
+def cleanup_old_logs():
+    """Clean up old log files"""
+    try:
+        # Clean up logs directory
+        data_dir.cleanup_temp()  # Clean temp files first
+        
+        now = datetime.now()
+        log_pattern = os.path.join(data_dir.logs_dir, 'discord_exporter.log*')
+        
+        for log_file in glob.glob(log_pattern):
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(log_file))
+                if now - mtime > timedelta(days=30):
+                    os.remove(log_file)
+                    logger.info(f"Removed old log file: {log_file}")
+            except Exception as e:
+                logger.error(f"Error cleaning up log file {log_file}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error during log cleanup: {e}")
+
+# Initialize data directory first
+data_dir = DataDirectory()
+
+# Clean up old logs at startup
+cleanup_old_logs()
+
+# 3. VERSION
 VERSION = "1.0.0"
 
-# 3. ENVIRONMENT SETUP
+# 4. ENVIRONMENT SETUP
 def check_env_file():
     """Check if token is available"""
     token = os.getenv('DISCORD_TOKEN')
@@ -42,25 +147,43 @@ if not TOKEN:
 print("Token loaded successfully (token hidden for security)")
 
 # 4. LOGGING CONFIGURATION
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('discord_exporter.log'),
-        logging.StreamHandler()
-    ]
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# File handler with rotation
+file_handler = RotatingFileHandler(
+    data_dir.get_log_file('discord_exporter.log'),  # Use data directory
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=5,
+    encoding='utf-8'
 )
+file_handler.setFormatter(log_formatter)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+# Configure logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Remove any existing handlers to prevent duplicates
+for handler in logger.handlers[:]:
+    if not isinstance(handler, (RotatingFileHandler, logging.StreamHandler)):
+        logger.removeHandler(handler)
 
 # 5. CLASS DEFINITIONS
 class ProgressTracker:
     def __init__(self, message, total=None):
         self.message = message
         self.count = 0
+        self.filtered_count = 0
         self.total = total
         self.last_update = time.time()
         self.update_interval = 2
         self.batch_size = 100
+        self.last_message = None  # Track last message to prevent duplicates
 
     def _generate_progress_bar(self, progress):
         length = 20
@@ -68,9 +191,17 @@ class ProgressTracker:
         bar = '█' * filled + '░' * (length - filled)
         return f'[{bar}]'
 
-    async def update(self, force=False):
+    async def update(self, force=False, filtered=False, batch_mode=False):
+        """
+        Update progress
+        batch_mode: True if updating for a batch of messages (don't increment count)
+        """
         try:
-            self.count += 1
+            if not batch_mode:
+                self.count += 1
+                if filtered:
+                    self.filtered_count += 1
+            
             current_time = time.time()
             should_update = force or (
                 self.count % self.batch_size == 0 and 
@@ -80,20 +211,25 @@ class ProgressTracker:
             if should_update:
                 self.last_update = current_time
                 try:
-                    if self.total:
-                        progress = (self.count / self.total) * 100
-                        bar = self._generate_progress_bar(progress)
-                        await self.message.edit(
-                            content=f"Progress: {self.count:,}/{self.total:,} messages {bar} ({progress:.1f}%)"
-                        )
-                    else:
-                        await self.message.edit(
-                            content=f"Progress: {self.count:,} messages processed..."
-                        )
+                    message = self._generate_progress_message()
+                    if message != self.last_message:  # Only update if message changed
+                        await self.message.edit(content=message)
+                        self.last_message = message
                 except discord.errors.HTTPException as e:
                     logger.error(f"Failed to update progress: {e}")
         except Exception as e:
             logger.error(f"Progress update error: {e}")
+
+    def _generate_progress_message(self):
+        """Generate progress message string"""
+        if self.total and self.total > 0:
+            progress = min((self.count / self.total) * 100, 100)
+            bar = self._generate_progress_bar(progress)
+            filtered_info = f" ({self.filtered_count:,} matched)" if self.filtered_count else ""
+            return f"Progress: {self.count:,}/{self.total:,} messages {bar} ({progress:.1f}%){filtered_info}"
+        else:
+            filtered_info = f" ({self.filtered_count:,} matched)" if self.filtered_count else ""
+            return f"Progress: {self.count:,} messages processed...{filtered_info}"
 
 class ExporterBot(discord.Client):
     def __init__(self):
@@ -188,6 +324,30 @@ class MessageChunker:
         if self.current_chunk:
             await self._save_chunk(channel_name, is_csv, original_message)
 
+class ExportCleanup:
+    """Context manager for export cleanup"""
+    def __init__(self, client, task):
+        self.client = client
+        self.task = task
+        self.start_time = time.time()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            duration = time.time() - self.start_time
+            logger.info(f"Export completed in {duration:.1f}s")
+            
+            # Force garbage collection
+            clear_memory()
+            
+            # Remove task from active exports
+            self.client._active_exports.discard(self.task)
+            
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+
 # 6. UTILITY FUNCTIONS
 def clear_memory():
     """Force garbage collection"""
@@ -217,21 +377,13 @@ async def check_memory_usage(message_count, message):
 
 # 7. DECORATORS
 def handle_errors(func):
+    """Error handling decorator for event handlers"""
+    @wraps(func)
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
-        except discord.errors.Forbidden as e:
-            logger.error(f"Permission error: {e}")
-            if hasattr(args[0], 'channel'):
-                await args[0].channel.send("❌ I don't have the required permissions!")
-        except discord.errors.HTTPException as e:
-            logger.error(f"Discord API error: {e}")
-            if hasattr(args[0], 'channel'):
-                await args[0].channel.send("❌ Discord API error. Please try again later.")
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            if hasattr(args[0], 'channel'):
-                await args[0].channel.send(f"❌ An error occurred: {str(e)}")
+            logger.error(f"Error in {func.__name__}: {e}")
     return wrapper
 
 def retry_on_error(retries=3, delay=1):
@@ -249,22 +401,38 @@ def retry_on_error(retries=3, delay=1):
         return wrapper
     return decorator
 
-def command_cooldown(cooldown_seconds=5):
+def command_cooldown(seconds: int):
+    """Cooldown decorator for commands"""
     def decorator(func):
-        last_used = {}
-        @functools.wraps(func)  # This preserves the original function's signature
+        last_used = {}  # Store last use time per user
+        
+        @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
             user_id = interaction.user.id
             current_time = time.time()
-            if user_id in last_used and current_time - last_used[user_id] < cooldown_seconds:
-                remaining = int(cooldown_seconds - (current_time - last_used[user_id]))
-                await interaction.response.send_message(
-                    f"⏳ Please wait {remaining} seconds before using this command again.",
-                    ephemeral=True
-                )
-                return
+            
+            # Check cooldown
+            if user_id in last_used:
+                time_since_last = current_time - last_used[user_id]
+                if time_since_last < seconds:
+                    remaining = int(seconds - time_since_last)
+                    await interaction.response.send_message(
+                        f"⏳ Please wait {remaining} seconds before using this command again.",
+                        ephemeral=True
+                    )
+                    return
+            
+            # Update last use time
             last_used[user_id] = current_time
+            
+            # Clean up old entries periodically
+            if len(last_used) > 1000:  # Prevent memory leak
+                cutoff = current_time - (seconds * 2)
+                last_used.clear()
+            
+            # Execute command
             return await func(interaction, *args, **kwargs)
+            
         return wrapper
     return decorator
 
@@ -301,51 +469,43 @@ async def process_message_filters(msg, role, category, channel, search, date_fro
         logger.error(f"Filter error: {e}")
         return False
 
-async def create_message_data(msg, data_options):
-    """Create message data with selected options"""
+async def create_message_data(message: discord.Message, data_options: Optional[str] = None) -> Optional[dict]:
+    """Create message data dictionary with optional data fields"""
     try:
-        message_data = {
-            'Author': str(msg.author),
-            'Content': msg.content,
-            'Timestamp': msg.created_at.isoformat()
+        # Parse data options
+        options = set(map(int, data_options.split(','))) if data_options else set()
+        
+        # Base message data
+        data = {
+            'Message ID': str(message.id),
+            'Author': str(message.author),
+            'Content': message.content,
+            'Channel': message.channel.name,
+            'Timestamp': message.created_at.strftime('%Y-%m-%d %H:%M:%S'),
         }
-
-        if data_options:
-            options = [int(x.strip()) for x in data_options.split(',') if x.strip().isdigit() and 0 < int(x.strip()) < 7]
+        
+        # Optional data based on options
+        if 1 in options:  # Attachments
+            data['Attachments'] = ', '.join([a.url for a in message.attachments])
             
-            if 1 in options:  # Attachments
-                message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
+        if 2 in options:  # Reactions
+            data['Reactions'] = ', '.join([f"{r.emoji}:{r.count}" for r in message.reactions])
             
-            if 2 in options:  # Reactions
-                reactions = [f"{r.emoji}: {r.count}" for r in msg.reactions]
-                message_data['Reactions'] = ', '.join(reactions)
+        if 3 in options:  # Reply References
+            data['Reply To'] = str(message.reference.message_id) if message.reference else ''
             
-            if 3 in options:  # Reply References
-                if msg.reference and isinstance(msg.reference.resolved, discord.Message):
-                    message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
-                else:
-                    message_data['Replying_To'] = ''
+        if 4 in options:  # Message Edits
+            data['Edited'] = message.edited_at.strftime('%Y-%m-%d %H:%M:%S') if message.edited_at else ''
             
-            if 4 in options:  # Edits
-                message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+        if 5 in options:  # Embeds
+            data['Embeds'] = len(message.embeds)
             
-            if 5 in options:  # Embeds
-                embeds_data = []
-                for embed in msg.embeds:
-                    embed_info = {
-                        'title': embed.title,
-                        'description': embed.description,
-                        'url': embed.url
-                    }
-                    embeds_data.append(str(embed_info))
-                message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+        if 6 in options:  # Pinned Status
+            data['Pinned'] = message.pinned
             
-            if 6 in options:  # Pinned
-                message_data['Pinned'] = str(msg.pinned)
-
-        return message_data
+        return data
     except Exception as e:
-        logger.error(f"Message data creation error: {e}")
+        logger.error(f"Error creating message data: {e}")
         return None
 
 class SafeBuffer:
@@ -369,71 +529,40 @@ class SafeBuffer:
                 pass
 
 # Use in save_and_send_messages
-async def save_and_send_messages(messages, channel_name, suffix, is_csv, chunk_size, original_message):
-    with SafeBuffer() as safe_buffer:
+async def save_and_send_messages(messages: List[dict], channel_name: str, suffix: str, is_csv: bool, chunk_size: int, message: discord.Message):
+    """Save messages to file and send to channel"""
+    try:
+        # Create DataFrame
+        df = pd.DataFrame(messages)
+        
+        # Prepare filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{channel_name}_{timestamp}_{suffix}"
+        
+        # Save to temp file
+        temp_path = data_dir.get_temp_file(filename)
+        if is_csv:
+            df.to_csv(f"{temp_path}.csv", index=False, encoding='utf-8-sig')
+            file_path = f"{temp_path}.csv"
+        else:
+            df.to_excel(f"{temp_path}.xlsx", index=False)
+            file_path = f"{temp_path}.xlsx"
+        
+        # Send file
+        await message.channel.send(
+            f"📊 Export part ({len(messages):,} messages)",
+            file=discord.File(file_path)
+        )
+        
+        # Cleanup temp file
         try:
-            if not messages:
-                return
-
-            # Add file size check before processing
-            estimated_size = len(str(messages)) / 1024  # Rough size estimate in KB
-            if estimated_size > 7000:  # Close to Discord's 8MB limit
-                await original_message.channel.send("⚠️ Large file detected, using compression...")
+            os.remove(file_path)
+        except:
+            pass
             
-            # Clean message data
-            cleaned_messages = []
-            for msg in messages:
-                try:
-                    # Remove invalid characters and normalize data
-                    msg['Content'] = msg['Content'].replace('\x00', '').strip()
-                    msg['Author'] = msg['Author'].replace('\x00', '').strip()
-                    cleaned_messages.append(msg)
-                except Exception as e:
-                    logger.error(f"Message cleaning error: {e}")
-                    continue
-
-            file_extension = 'csv' if is_csv else 'xlsx'
-            base_filename = f'{channel_name}_messages_{suffix}.{file_extension}'
-            zip_filename = f'{channel_name}_messages_{suffix}.zip'
-            
-            # Create ZIP file in memory with error handling
-            zip_buffer = safe_buffer.create_buffer()
-            try:
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    df = pd.DataFrame(cleaned_messages)
-                    if is_csv:
-                        csv_buffer = safe_buffer.create_buffer(io.StringIO)
-                        df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
-                        zip_file.writestr(base_filename, csv_buffer.getvalue())
-                    else:
-                        excel_buffer = safe_buffer.create_buffer(io.BytesIO)
-                        df.to_excel(excel_buffer, index=False, engine='openpyxl')
-                        zip_file.writestr(base_filename, excel_buffer.getvalue())
-            except Exception as e:
-                logger.error(f"Compression error: {e}")
-                raise
-
-            # Check file size before sending
-            zip_buffer.seek(0, os.SEEK_END)
-            size = zip_buffer.tell()
-            zip_buffer.seek(0)
-            
-            if size > 8 * 1024 * 1024:  # 8MB
-                raise ValueError("File too large for Discord upload")
-
-            await original_message.channel.send(
-                f'Extracted {len(cleaned_messages)} messages from "{channel_name}" (compressed).',
-                file=discord.File(zip_buffer, filename=zip_filename)
-            )
-            
-        except discord.errors.HTTPException as e:
-            error_msg = "File too large. Try reducing the chunk size or using CSV format." if e.code == 40005 else f"Discord error: {str(e)}"
-            await original_message.channel.send(f"❌ {error_msg}")
-            logger.error(f"HTTP error: {e}")
-        except Exception as e:
-            await original_message.channel.send(f"❌ Error saving/sending file: {str(e)}")
-            logger.error(f"Save/send error: {e}", exc_info=True)
-            raise
+    except Exception as e:
+        logger.error(f"Error saving messages: {e}")
+        await message.channel.send(f"❌ Error saving messages: {str(e)}")
 
 # Add to helper functions
 async def estimate_message_count(channel: discord.TextChannel, role=None, after=None, before=None) -> int:
@@ -450,15 +579,70 @@ async def estimate_message_count(channel: discord.TextChannel, role=None, after=
                 continue
             count += 1
         
+        if count == 0:
+            return 1000  # Default estimate if no messages found in sample
+            
         # Estimate total based on sample
         total_seconds = (before or datetime.now()) - (after or channel.created_at)
         sample_seconds = timedelta(days=7)
         ratio = total_seconds / sample_seconds
-        estimated_total = int(count * ratio)
+        estimated_total = max(int(count * ratio), count)  # Never estimate less than what we counted
         return min(estimated_total, 1000000)  # Cap at 1M for safety
     except Exception as e:
         logger.error(f"Error estimating messages: {e}")
-        return None
+        return 1000  # Default fallback estimate
+
+# Add this helper function to handle pagination
+async def fetch_messages_with_pagination(channel, progress_tracker=None, max_retries=5, timeout=30.0):
+    messages = []
+    last_message_id = None
+    batch_count = 0
+    retry_count = 0
+    
+    while True:
+        try:
+            async with asyncio.timeout(timeout):
+                batch = await channel.history(
+                    limit=100,
+                    before=last_message_id and discord.Object(id=last_message_id)
+                ).flatten()
+            
+            retry_count = 0
+            
+            if not batch:
+                break
+                
+            messages.extend(batch)
+            batch_count += 1
+            
+            if progress_tracker:
+                # Update progress for the batch
+                progress_tracker.count += len(batch)
+                await progress_tracker.update(force=True, batch_mode=True)
+            
+            last_message_id = batch[-1].id
+            await asyncio.sleep(min(2.0, 0.25 * batch_count))
+            
+        except (asyncio.TimeoutError, discord.errors.HTTPException, aiohttp.ClientError) as e:
+            retry_count += 1
+            if retry_count >= max_retries:
+                if isinstance(e, asyncio.TimeoutError):
+                    raise ValueError(f"Operation timed out after {max_retries} retries")
+                elif isinstance(e, discord.errors.HTTPException):
+                    if e.code in [50001, 50013]:
+                        raise ValueError(f"Permission error: {str(e)}")
+                    elif e.code == 429:
+                        raise ValueError(f"Too many rate limits hit after {max_retries} retries")
+                raise ValueError(f"Error after {max_retries} retries: {str(e)}")
+            
+            wait_time = retry_count * 2 if isinstance(e, asyncio.TimeoutError) else retry_count
+            if isinstance(e, discord.errors.HTTPException) and e.code == 429:
+                wait_time = e.retry_after if hasattr(e, 'retry_after') else 5
+            
+            logger.warning(f"Error (attempt {retry_count}/{max_retries}), waiting {wait_time}s: {str(e)}")
+            await asyncio.sleep(wait_time)
+    
+    return messages
 
 # 9. BOT INITIALIZATION
 client = ExporterBot()  # Initialize immediately instead of setting to None
@@ -519,50 +703,116 @@ async def export(
     chunk_size: Optional[int] = 10000,
     data_options: Optional[str] = None
 ):
-    try:
-        # Create export task and track user
-        task = asyncio.current_task()
-        task.user_id = interaction.user.id
-        task.start_time = time.time()  # Add timing
-        client._active_exports.add(task)
-        
-        # Memory and cooldown checks
-        if not await client.check_memory():
-            await interaction.response.send_message("⚠️ Low memory available. Try smaller chunk size.")
-            return
+    if bot_state.is_maintenance_mode:
+        await interaction.response.send_message("🔧 Bot is currently in maintenance mode. Please try again later.")
+        return
 
-        if not await client.can_export():
-            await interaction.response.send_message("⏳ Please wait a few seconds between exports.")
-            return
-
-        await interaction.response.send_message("Processing your request...")
-        message = await interaction.original_response()
-        
-        # Initialize progress tracker
-        progress = ProgressTracker(message)
-        
-        # Initialize chunker
-        chunker = MessageChunker(chunk_size)
-        
-        # Process messages
-        async for msg in channel.history(limit=None):
-            await progress.update()
+    task = asyncio.current_task()
+    
+    async with ExportCleanup(client, task):
+        try:
+            task.user_id = interaction.user.id
+            task.start_time = time.time()
+            client._active_exports.add(task)
             
-            if not await process_message_filters(msg, role, category, channel, search, date_from, date_to):
-                continue
+            # Memory and cooldown checks
+            if not await client.check_memory():
+                await interaction.response.send_message("⚠️ Low memory available. Try smaller chunk size.")
+                return
 
-            message_data = await create_message_data(msg, data_options)
-            if message_data:
-                await chunker.add_message(message_data, channel.name, format == "csv", message)
+            if not await client.can_export():
+                await interaction.response.send_message("⏳ Please wait a few seconds between exports.")
+                return
 
-        # Save any remaining messages
-        await chunker.finish(channel.name, format == "csv", message)
+            await interaction.response.send_message("Processing your request...")
+            message = await interaction.original_response()
+            
+            # Parse dates safely
+            start_date = None
+            end_date = None
+            if date_from:
+                try:
+                    start_date = datetime.strptime(date_from, '%Y-%m-%d')
+                except ValueError:
+                    await interaction.response.send_message("❌ Invalid start date format. Use YYYY-MM-DD")
+                    return
+                
+            if date_to:
+                try:
+                    end_date = datetime.strptime(date_to, '%Y-%m-%d')
+                except ValueError:
+                    await interaction.response.send_message("❌ Invalid end date format. Use YYYY-MM-DD")
+                    return
+            
+            if start_date and end_date and start_date > end_date:
+                await interaction.response.send_message("❌ Start date must be before end date")
+                return
+            
+            # Initialize progress tracker with estimated count
+            estimated_count = await estimate_message_count(channel, role, start_date, end_date)
+            progress = ProgressTracker(message, total=estimated_count or 1000)  # Fallback estimate
+            
+            # Initialize chunker
+            chunker = MessageChunker(chunk_size)
+            processed_count = 0
+            
+            try:
+                # Fetch all messages with pagination
+                messages = await fetch_messages_with_pagination(channel, progress)
+                total_messages = len(messages)
+                
+                if total_messages == 0:
+                    await message.edit(content="❌ No messages found in channel")
+                    return
+                
+                await message.edit(content=f"Processing {total_messages:,} messages...")
+                
+                # Process the fetched messages
+                for msg in messages:
+                    # Check memory periodically
+                    is_ok, warning_message = memory_monitor.check()
+                    if not is_ok:
+                        await warning_message.channel.send(warning_message)
+                        return
+                    elif warning_message:  # Warning message
+                        await warning_message.channel.send(warning_message)
+                    
+                    if not await process_message_filters(msg, role, category, channel, search, date_from, date_to):
+                        await progress.update(filtered=False)
+                        continue
 
-    except Exception as e:
-        await message.channel.send(f"❌ Export failed: {str(e)}")
-        logger.error(f"Export error: {e}", exc_info=True)
-    finally:
-        client._active_exports.discard(task)
+                    message_data = await create_message_data(msg, data_options)
+                    if message_data:
+                        await chunker.add_message(message_data, channel.name, format == "csv", message)
+                        processed_count += 1
+                        await progress.update(filtered=True)
+                    else:
+                        await progress.update(filtered=False)
+                
+                if processed_count == 0:
+                    await message.edit(content="❌ No messages matched the filters")
+                    return
+                
+                # Record successful export
+                bot_state.record_export(True, processed_count)
+                await message.edit(content=f"✅ Processed {processed_count:,} out of {total_messages:,} messages")
+                
+                # Save any remaining messages
+                await chunker.finish(channel.name, format == "csv", message)
+
+            except ValueError as e:
+                bot_state.last_error = str(e)
+                bot_state.record_export(False)
+                await message.channel.send(f"❌ Error: {str(e)}")
+                return
+
+        except Exception as e:
+            bot_state.last_error = str(e)
+            bot_state.record_export(False)
+            await message.channel.send(f"❌ Export failed: {str(e)}")
+            logger.error(f"Export error: {e}", exc_info=True)
+        finally:
+            client._active_exports.discard(task)
 
 @client.tree.command(name="help", description="Show detailed help information")
 async def help(interaction: discord.Interaction):
@@ -720,7 +970,6 @@ async def restart(interaction: discord.Interaction):
         
         # Re-initialize
         new_client = await initialize()
-        BotInstance.set_instance(new_client)
         
         await interaction.followup.send("✅ Bot restarted successfully")
     except Exception as e:
@@ -940,21 +1189,202 @@ async def version(interaction: discord.Interaction):
         logger.error(f"Version error: {e}")
         await interaction.response.send_message("❌ Error showing version info")
 
+@client.tree.command(name="logs", description="Show recent log entries (Admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def logs(
+    interaction: discord.Interaction, 
+    lines: Optional[int] = 10,
+    level: Optional[Literal["INFO", "WARNING", "ERROR"]] = "ERROR"
+):
+    """Show recent log entries"""
+    try:
+        await interaction.response.defer()
+        
+        # Read last N*2 lines (to account for filtering)
+        log_entries = tail_file('discord_exporter.log', lines * 2)
+        
+        if not log_entries:
+            await interaction.followup.send("❌ No log file found or file is empty")
+            return
+            
+        # Filter by level
+        filtered_lines = [
+            line for line in log_entries 
+            if f" - {level} - " in line
+        ][-lines:]  # Take last N after filtering
+        
+        if not filtered_lines:
+            await interaction.followup.send(f"No {level} level logs found")
+            return
+            
+        # Format and send logs
+        formatted_logs = "```\n" + "".join(filtered_lines) + "```"
+        
+        if len(formatted_logs) > 1900:
+            chunks = [formatted_logs[i:i+1900] for i in range(0, len(formatted_logs), 1900)]
+            for chunk in chunks:
+                await interaction.followup.send(chunk)
+        else:
+            await interaction.followup.send(formatted_logs)
+            
+    except Exception as e:
+        logger.error(f"Log view error: {e}")
+        await interaction.followup.send("❌ Error showing logs")
+
+@client.tree.command(name="detailed-stats", description="Show detailed bot statistics")
+@app_commands.checks.has_permissions(administrator=True)
+async def detailed_stats(interaction: discord.Interaction):
+    """Show detailed bot statistics"""
+    try:
+        stats = bot_state.get_stats()
+        
+        embed = discord.Embed(
+            title="Bot Statistics",
+            description=f"Uptime: {stats['uptime']}",
+            color=discord.Color.blue()
+        )
+        
+        # Export Stats
+        embed.add_field(
+            name="Export Statistics",
+            value=f"""
+            Total Exports: {stats['total_exports']}
+            Successful: {stats['successful_exports']}
+            Failed: {stats['failed_exports']}
+            Success Rate: {stats['success_rate']}
+            Messages Processed: {stats['total_messages']:,}
+            """,
+            inline=False
+        )
+        
+        # System Status
+        memory = psutil.virtual_memory()
+        embed.add_field(
+            name="System Status",
+            value=f"""
+            Memory Usage: {memory.percent}%
+            Active Exports: {len(client._active_exports)}
+            Maintenance Mode: {'🔧 Enabled' if stats['maintenance_mode'] else '✅ Disabled'}
+            """,
+            inline=False
+        )
+        
+        # Last Error
+        if stats['last_error']:
+            embed.add_field(
+                name="Last Error",
+                value=f"```\n{stats['last_error']}\n```",
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        await interaction.response.send_message("❌ Error showing statistics")
+
+@client.tree.command(name="maintenance", description="Toggle maintenance mode (Admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def maintenance(
+    interaction: discord.Interaction,
+    enable: bool
+):
+    """Toggle maintenance mode"""
+    try:
+        bot_state.set_maintenance_mode(enable)
+        status = "🔧 enabled" if enable else "✅ disabled"  # Fixed emoji encoding
+        
+        if enable:
+            # Cancel all active exports
+            for task in client._active_exports.copy():
+                try:
+                    task.cancel()
+                    logger.info(f"Cancelled export task for user {getattr(task, 'user_id', 'unknown')}")
+                except Exception as e:
+                    logger.error(f"Error cancelling task: {e}")
+            client._active_exports.clear()
+            
+            # Force cleanup
+            clear_memory()
+            
+        await interaction.response.send_message(f"Maintenance mode {status}")
+        logger.info(f"Maintenance mode {status}")
+    except Exception as e:
+        logger.error(f"Maintenance mode error: {e}")
+        await interaction.response.send_message("❌ Error toggling maintenance mode")
+
 # Add after bot initialization
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
     logger.info("Shutdown signal received")
-    if client:
-        logger.info("Cleaning up...")
-        asyncio.run_coroutine_threadsafe(client.close(), client.loop)
+    asyncio.run(shutdown_handler())
     sys.exit(0)
 
+# Move shutdown_handler up before signal handlers
+async def shutdown_handler():
+    """Handle graceful shutdown with timeout"""
+    try:
+        logger.info("Shutting down bot...")
+        client = BotInstance.get_instance()
+        if client:
+            try:
+                # Set timeout for shutdown process
+                async with asyncio.timeout(30):
+                    # Save bot state
+                    bot_state.save_state()
+                    logger.info("Bot state saved")
+                    
+                    # Cancel all active exports
+                    for task in client._active_exports.copy():
+                        try:
+                            task.cancel()
+                            logger.info(f"Cancelled export task for user {getattr(task, 'user_id', 'unknown')}")
+                        except Exception as e:
+                            logger.error(f"Error cancelling task: {e}")
+                    
+                    # Clear memory
+                    clear_memory()
+                    
+                    # Close aiohttp session
+                    if client._session and not client._session.closed:
+                        await client._session.close()
+                    
+                    # Close Discord connection
+                    if not client.is_closed():
+                        await client.close()
+                    
+                    logger.info("Shutdown complete")
+            except asyncio.TimeoutError:
+                logger.error("Shutdown timed out after 30 seconds")
+                bot_state.save_state()  # Try to save state even if timeout occurs
+            except Exception as e:
+                logger.error(f"Error during shutdown sequence: {e}")
+                bot_state.save_state()  # Try to save state even if error occurs
+    except Exception as e:
+        logger.error(f"Critical error during shutdown: {e}")
+        try:
+            bot_state.save_state()  # Final attempt to save state
+        except:
+            pass
+    finally:
+        # Force exit if something went wrong
+        sys.exit(1)
+
+# Add signal handlers after shutdown_handler is defined
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+atexit.register(lambda: asyncio.run(shutdown_handler()))
 
 # 12. RUN BOT
 if __name__ == "__main__":
     try:
+        # Clean up old logs
+        cleanup_old_logs()
+        
+        # Check directory permissions
+        if not data_dir.check_permissions():
+            logger.error("Failed to verify directory permissions")
+            sys.exit(1)
+        
         # Set up signal handlers
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -964,3 +1394,253 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Startup error: {e}")
         sys.exit(1)
+
+# Add to utility functions
+class MemoryMonitor:
+    """Monitor memory usage and trigger cleanup when needed"""
+    def __init__(self, warning_threshold=70, critical_threshold=85, trend_samples=5):
+        self.warning_threshold = warning_threshold
+        self.critical_threshold = critical_threshold
+        self.last_check = time.time()
+        self.check_interval = 60  # Check every minute
+        self.trend_samples = trend_samples
+        self.memory_history = []  # Track memory usage trend
+
+    def check(self) -> tuple[bool, str]:
+        """
+        Check memory usage and track trends
+        Returns: (is_ok, message)
+        """
+        current_time = time.time()
+        if current_time - self.last_check < self.check_interval:
+            return True, ""
+            
+        self.last_check = current_time
+        memory = psutil.virtual_memory()
+        
+        # Add to history and keep last N samples
+        self.memory_history.append(memory.percent)
+        if len(self.memory_history) > self.trend_samples:
+            self.memory_history.pop(0)
+        
+        # Calculate trend
+        trend_increasing = len(self.memory_history) > 1 and all(
+            self.memory_history[i] < self.memory_history[i+1] 
+            for i in range(len(self.memory_history)-1)
+        )
+        
+        message = ""
+        if memory.percent >= self.critical_threshold:
+            clear_memory()
+            message = f"❌ Critical memory usage: {memory.percent}%"
+            return False, message
+        elif memory.percent >= self.warning_threshold:
+            message = f"⚠️ High memory usage: {memory.percent}%"
+            if trend_increasing:
+                message += " (Trending up ↗️)"
+                clear_memory()  # Preemptive cleanup
+            return True, message
+        elif trend_increasing and memory.percent >= self.warning_threshold * 0.8:
+            message = f"ℹ️ Memory usage trending up: {memory.percent}%"
+            
+        return True, message
+
+# Initialize memory monitor
+memory_monitor = MemoryMonitor()
+
+# Add to utility functions
+def tail_file(filename: str, n: int) -> List[str]:
+    """Read last n lines from file efficiently"""
+    try:
+        with open(filename, 'rb') as f:
+            # Get file size
+            f.seek(0, 2)
+            size = f.tell()
+            
+            # Empty file
+            if size == 0:
+                return []
+                
+            # Read blocks from end
+            block_size = 1024
+            block_count = -1
+            lines = []
+            
+            while len(lines) < n:
+                seek_size = block_count * block_size
+                if -seek_size > size:
+                    # Reached start of file
+                    f.seek(0)
+                    lines = f.readlines()[-n:]
+                    break
+                    
+                f.seek(seek_size, 2)
+                lines = f.readlines()
+                block_count -= 1
+            
+            return [line.decode('utf-8', errors='replace') for line in lines[-n:]]
+            
+    except Exception as e:
+        logger.error(f"Error reading log file: {e}")
+        return []
+
+# Add to utility functions
+class StateFileManager:
+    """Manage bot state file with proper permissions and backup"""
+    def __init__(self, filename: str, backup_count: int = 3):
+        self.filename = filename
+        self.backup_count = backup_count
+        self.backup_suffix = '.backup'
+        self._ensure_directory()
+
+    def _ensure_directory(self):
+        """Ensure state directory exists with proper permissions"""
+        directory = os.path.dirname(self.filename) or '.'
+        if not os.path.exists(directory):
+            os.makedirs(directory, mode=0o700)  # Secure permissions
+
+    def _create_backup(self):
+        """Create backup of state file"""
+        if os.path.exists(self.filename):
+            # Rotate backups
+            for i in range(self.backup_count - 1, 0, -1):
+                old = f"{self.filename}{self.backup_suffix}.{i}"
+                new = f"{self.filename}{self.backup_suffix}.{i+1}"
+                if os.path.exists(old):
+                    if os.path.exists(new):
+                        os.remove(new)
+                    os.rename(old, new)
+            
+            # Create new backup
+            backup = f"{self.filename}{self.backup_suffix}.1"
+            if os.path.exists(backup):
+                os.remove(backup)
+            import shutil
+            shutil.copy2(self.filename, backup)
+
+    def save(self, data: dict):
+        """Save data to state file with backup"""
+        try:
+            self._create_backup()
+            temp_file = f"{self.filename}.tmp"
+            with open(temp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(temp_file, self.filename)  # Atomic write
+            os.chmod(self.filename, 0o600)  # Secure file permissions
+            return True
+        except Exception as e:
+            logger.error(f"Error saving state file: {e}")
+            return False
+
+    def load(self) -> Optional[dict]:
+        """Load data from state file or latest backup"""
+        files_to_try = [
+            self.filename,
+            *[f"{self.filename}{self.backup_suffix}.{i}" 
+              for i in range(1, self.backup_count + 1)]
+        ]
+        
+        for file in files_to_try:
+            try:
+                if os.path.exists(file):
+                    with open(file, 'r') as f:
+                        data = json.load(f)
+                    if file != self.filename:
+                        logger.warning(f"Loaded state from backup: {file}")
+                    return data
+            except Exception as e:
+                logger.error(f"Error loading state from {file}: {e}")
+        
+        return None
+
+class BotState:
+    def __init__(self):
+        self.start_time = time.time()
+        self.total_exports = 0
+        self.successful_exports = 0
+        self.failed_exports = 0
+        self.total_messages_processed = 0
+        self.last_error = None
+        self.is_maintenance_mode = False
+        self.state_manager = StateFileManager(data_dir.get_state_file('bot_state.json'))  # Use data directory
+        self.load_state()
+
+    def save_state(self):
+        """Save state to file"""
+        state = {
+            'total_exports': self.total_exports,
+            'successful_exports': self.successful_exports,
+            'failed_exports': self.failed_exports,
+            'total_messages_processed': self.total_messages_processed,
+            'is_maintenance_mode': self.is_maintenance_mode
+        }
+        if self.state_manager.save(state):
+            logger.info("Bot state saved")
+        else:
+            logger.error("Failed to save bot state")
+
+    def load_state(self):
+        """Load state from file"""
+        state = self.state_manager.load()
+        if state:
+            self.total_exports = state.get('total_exports', 0)
+            self.successful_exports = state.get('successful_exports', 0)
+            self.failed_exports = state.get('failed_exports', 0)
+            self.total_messages_processed = state.get('total_messages_processed', 0)
+            self.is_maintenance_mode = state.get('is_maintenance_mode', False)
+            logger.info("Bot state loaded")
+
+    def record_export(self, success: bool, messages_processed: int = 0):
+        """Record export statistics and save state"""
+        self.total_exports += 1
+        if success:
+            self.successful_exports += 1
+        else:
+            self.failed_exports += 1
+        self.total_messages_processed += messages_processed
+        self.save_state()  # Save after each update
+
+    def get_stats(self) -> dict:
+        """Get current statistics"""
+        uptime = time.time() - self.start_time
+        days = int(uptime // (24 * 3600))
+        hours = int((uptime % (24 * 3600)) // 3600)
+        minutes = int((uptime % 3600) // 60)
+        
+        return {
+            'uptime': f"{days}d {hours}h {minutes}m",
+            'total_exports': self.total_exports,
+            'successful_exports': self.successful_exports,
+            'failed_exports': self.failed_exports,
+            'success_rate': f"{(self.successful_exports / self.total_exports * 100):.1f}%" if self.total_exports > 0 else "N/A",
+            'total_messages': self.total_messages_processed,
+            'last_error': str(self.last_error) if self.last_error else None,
+            'maintenance_mode': self.is_maintenance_mode
+        }
+
+    def set_maintenance_mode(self, enabled: bool):
+        """Set maintenance mode"""
+        self.is_maintenance_mode = enabled
+
+# Initialize bot state
+bot_state = BotState()
+
+# Add to utility functions
+async def initialize():
+    """Initialize bot with fresh state"""
+    try:
+        client = ExporterBot()
+        BotInstance.set_instance(client)
+        
+        # Initialize any async resources
+        client._session = aiohttp.ClientSession()
+        
+        # Clear memory and check permissions
+        clear_memory()
+        if not data_dir.check_permissions():
+            raise ValueError("Failed to verify directory permissions")
+            
+        return client
+    except Exception as e:
+        logger.error(f"Initialization error: {e}")
+        raise
