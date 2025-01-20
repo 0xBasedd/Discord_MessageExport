@@ -9,25 +9,107 @@ A powerful Discord bot that exports messages from channels to Excel or CSV files
 - Multiple filtering options:
   - Filter by one or multiple roles
   - Filter by channel category
-  - Filter by date range
-  - Search message content
-- Progress tracking for large exports
-- Automatic file splitting for large exports (>10,000 messages)
-- Secure token handling
+  - Search within messages
+  - Date range filtering
+- Progress tracking with visual progress bar
+- Chunked exports for large channels
+- Memory-efficient processing
+- Automatic compression for large exports
 
-### Export Data Options
-1. **Basic Message Data**
-   - Author
-   - Content
-   - Timestamp
+### Data Collection Options
+1. Attachments URLs
+2. Message Reactions
+3. Reply References
+4. Message Edits
+5. Message Embeds
+6. Pinned Status
 
-2. **Additional Data Options**
-   - Attachments URLs
-   - Message Reactions (emoji and count)
-   - Reply References
-   - Message Edit History
-   - Message Embeds
-   - Pinned Status
+## Commands
+
+### Basic Commands
+- `/help` - Show detailed help information
+- `/test` - Check if bot is working
+- `/about` - Show bot information
+- `/commands` - List all available commands
+- `/version` - Show bot version and system info
+
+### Export Commands
+- `/export` - Export messages with filtering options
+- `/progress` - Show current export progress
+- `/cancel` - Cancel your active exports
+- `/queue` - Show export queue status
+
+### Status Commands
+- `/status` - Show basic bot status
+- `/stats` - Show detailed statistics
+
+### Admin Commands
+- `/cleanup` - Force cleanup of resources (Admin only)
+- `/restart` - Restart the bot (Admin only)
+
+## Export Command Options
+
+### Required Options
+- `format` - Choose between 'excel' or 'csv'
+- `channel` - Channel to export from
+- `role` - Primary role to filter by
+
+### Optional Options
+- `category` - Filter by channel category
+- `search` - Search terms in messages
+- `date_from` - Start date (YYYY-MM-DD)
+- `date_to` - End date (YYYY-MM-DD)
+- `chunk_size` - Messages per file (default: 10000)
+- `data_options` - Additional data to include (comma-separated numbers 1-6)
+
+## Example Usage
+
+### Basic Export
+```
+/export format:csv channel:#general role:@Member
+```
+
+### Advanced Export
+```
+/export format:excel channel:#announcements role:@Mod category:Important search:update date_from:2023-01-01 date_to:2023-12-31 chunk_size:5000 data_options:1,2,3
+```
+
+## Setup
+
+1. Create a `.env` file with your bot token:
+```
+DISCORD_TOKEN=your_token_here
+```
+
+2. Install required packages:
+```bash
+pip install -r requirements.txt
+```
+
+3. Run the bot:
+```bash
+python Discord_Message_exporter.py
+```
+
+## Requirements
+- Python 3.8+
+- discord.py
+- pandas
+- openpyxl
+- python-dotenv
+- psutil
+
+## Error Handling
+- Automatic retries for Discord API errors
+- Memory usage monitoring
+- Graceful shutdown handling
+- Detailed error logging
+
+## Notes
+- Large exports are automatically compressed
+- Progress updates include visual progress bar
+- Memory usage is monitored and warnings are provided
+- Export tasks can be cancelled at any time
 
 ## Advanced Features
 
@@ -345,6 +427,32 @@ A powerful Discord bot that exports messages from channels to Excel or CSV files
    - Attach Files
      - Needed to send export files
      - Required for main functionality
+
+## Commands
+
+### Slash Commands
+- `/export` - Export messages to Excel
+- `/exportcsv` - Export messages to CSV
+- `/test` - Check if bot is working
+
+### Legacy Commands (Text Based)
+- `!extract` - Export messages to Excel
+- `!extractcsv` - Export messages to CSV
+- `!test` - Check if bot is working
+
+### Using Slash Commands vs Text Commands
+
+1. **Slash Commands** `/export`
+   - Better mobile experience
+   - Auto-complete support
+   - Clear command visibility
+   - Modern Discord integration
+
+2. **Text Commands** `!extract`
+   - Works in older Discord clients
+   - Faster for power users
+   - No special permissions needed
+   - Legacy support
 
 ## Usage
 
@@ -702,3 +810,57 @@ railway.toml       # Build config
    restartPolicyType = "ON_FAILURE"
    restartPolicyMaxRetries = 10
    ```
+
+## Command Usage
+
+### Slash Commands
+
+1. **`/export`**
+   ```
+   Required Options:
+   • format: [excel/csv] - Choose export format
+   • channel: [#channel] - Channel to export from
+   • role: [@role] - Primary role to filter by
+
+   Optional Options:
+   • category: [category] - Filter by channel category
+   • search: [text] - Search terms in messages
+   • date_from: [YYYY-MM-DD] - Start date
+   • date_to: [YYYY-MM-DD] - End date
+   • chunk_size: [number] - Messages per file (default: 10000)
+   ```
+
+2. **`/help`**
+   - Shows detailed command usage information
+   - Lists all available options
+   - Explains data export options
+
+3. **`/test`**
+   - Simple command to verify bot is working
+   - Returns confirmation message
+
+### Slash Command Advantages
+- **Auto-complete** - Options show available choices
+- **Validation** - Prevents invalid inputs
+- **Visual UI** - Clear option selection
+- **Mobile Friendly** - Better touch interface
+
+### Example Slash Command Usage
+```
+/export format:csv channel:#general role:@Member date_from:2023-01-01 date_to:2023-12-31 chunk_size:5000
+```
+
+### Additional Data Selection
+After using `/export`, you'll be prompted to select additional data:
+1. Attachments URLs
+2. Message Reactions
+3. Reply References
+4. Message Edits
+5. Message Embeds
+6. Pinned Status
+
+### Legacy Commands
+The traditional `!` commands are still available:
+- `!extract` - Classic Excel export
+- `!extractcsv` - Classic CSV export
+- `!test` - Basic bot check

@@ -1,3 +1,4 @@
+# 1. IMPORTS
 import discord
 import os
 import pandas as pd
@@ -13,11 +14,34 @@ import functools
 import traceback
 import psutil
 import time
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Literal
 import aiohttp
 import logging
+from discord import app_commands
+from discord.ext import commands
+import signal
 
-# Add logging configuration
+# 2. VERSION
+VERSION = "1.0.0"
+
+# 3. ENVIRONMENT SETUP
+def check_env_file():
+    """Check if token is available"""
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        print("Error: Discord token not found!")
+        print("Make sure DISCORD_TOKEN is set in your environment variables")
+        sys.exit(1)
+    return token
+
+# Load environment variables
+load_dotenv(override=True)
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    TOKEN = check_env_file()
+print("Token loaded successfully (token hidden for security)")
+
+# 4. LOGGING CONFIGURATION
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -28,498 +52,188 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Replace the env file check with a simpler version
-def check_env_file():
-    """Check if token is available"""
-    token = os.getenv('DISCORD_TOKEN')
-    if not token:
-        print("Error: Discord token not found!")
-        print("Make sure DISCORD_TOKEN is set in your environment variables")
-        sys.exit(1)
-    return token
+# 5. CLASS DEFINITIONS
+class ProgressTracker:
+    def __init__(self, message, total=None):
+        self.message = message
+        self.count = 0
+        self.total = total
+        self.last_update = time.time()
+        self.update_interval = 2
+        self.batch_size = 100
 
-# Move this before any function calls
-TOKEN = os.getenv('DISCORD_TOKEN')
+    def _generate_progress_bar(self, progress):
+        length = 20
+        filled = int(length * progress / 100)
+        bar = '█' * filled + '░' * (length - filled)
+        return f'[{bar}]'
 
-# Initialize environment
-if __name__ == "__main__":
-    # Load environment variables
-    load_dotenv(override=True)
-    
-    # Check token
-    if not TOKEN:
-        TOKEN = check_env_file()
-    
-    print("Token loaded successfully (token hidden for security)")
+    async def update(self, force=False):
+        try:
+            self.count += 1
+            current_time = time.time()
+            should_update = force or (
+                self.count % self.batch_size == 0 and 
+                current_time - self.last_update >= self.update_interval
+            )
+            
+            if should_update:
+                self.last_update = current_time
+                try:
+                    if self.total:
+                        progress = (self.count / self.total) * 100
+                        bar = self._generate_progress_bar(progress)
+                        await self.message.edit(
+                            content=f"Progress: {self.count:,}/{self.total:,} messages {bar} ({progress:.1f}%)"
+                        )
+                    else:
+                        await self.message.edit(
+                            content=f"Progress: {self.count:,} messages processed..."
+                        )
+                except discord.errors.HTTPException as e:
+                    logger.error(f"Failed to update progress: {e}")
+        except Exception as e:
+            logger.error(f"Progress update error: {e}")
 
-    # Define the bot with necessary intents
-    intents = discord.Intents.default()
-    intents.messages = True
-    intents.message_content = True
-    intents.guilds = True
-    intents.members = True
-    client = discord.Client(intents=intents)
+class ExporterBot(discord.Client):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.messages = True
+        intents.message_content = True
+        intents.guilds = True
+        intents.members = True
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self._last_export_time = 0
+        self._export_cooldown = 5
+        self._session = None
+        self._active_exports = set()
+        self._start_time = time.time()
 
-# Add error handling decorator
+    async def setup_hook(self):
+        self._session = aiohttp.ClientSession()
+        await self.tree.sync()
+
+    async def can_export(self):
+        current_time = time.time()
+        if current_time - self._last_export_time < self._export_cooldown:
+            return False
+        self._last_export_time = current_time
+        return True
+
+    async def check_memory(self):
+        """Check available memory and warn if low"""
+        available_memory = psutil.virtual_memory().available / (1024 * 1024)
+        return available_memory >= 100  # Return True if more than 100MB available
+
+    async def cleanup(self):
+        """Async cleanup tasks"""
+        try:
+            # Cancel active exports
+            for task in self._active_exports:
+                task.cancel()
+            self._active_exports.clear()
+
+            # Cancel other tasks
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            [task.cancel() for task in tasks]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Clear memory
+            clear_memory()
+            
+            # Close session
+            if self._session:
+                await self._session.close()
+                self._session = None
+                
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+
+    async def close(self):
+        """Clean shutdown"""
+        try:
+            await self.cleanup()
+        finally:
+            await super().close()
+
+class MessageChunker:
+    """Helper for managing message chunks"""
+    def __init__(self, chunk_size):
+        self.chunk_size = chunk_size
+        self.current_chunk = []
+        self.chunk_number = 0
+
+    async def add_message(self, message_data, channel_name, is_csv, original_message):
+        if message_data:
+            self.current_chunk.append(message_data)
+            
+        if len(self.current_chunk) >= self.chunk_size:
+            await self._save_chunk(channel_name, is_csv, original_message)
+
+    async def _save_chunk(self, channel_name, is_csv, original_message):
+        if self.current_chunk:
+            self.chunk_number += 1
+            await save_and_send_messages(
+                self.current_chunk,
+                channel_name,
+                f"part{self.chunk_number}",
+                is_csv,
+                self.chunk_size,
+                original_message
+            )
+            self.current_chunk = []
+
+    async def finish(self, channel_name, is_csv, original_message):
+        if self.current_chunk:
+            await self._save_chunk(channel_name, is_csv, original_message)
+
+# 6. UTILITY FUNCTIONS
+def clear_memory():
+    """Force garbage collection"""
+    import gc
+    gc.collect()
+
+# Replace global client with a proper singleton pattern
+class BotInstance:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        return cls._instance
+
+    @classmethod
+    def set_instance(cls, bot):
+        cls._instance = bot
+
+# Replace client references with BotInstance
+async def check_memory_usage(message_count, message):
+    """Check memory usage periodically"""
+    if message_count % 1000 == 0:
+        clear_memory()
+        client = BotInstance.get_instance()
+        if client and not await client.check_memory():
+            await message.channel.send("⚠️ Warning: Memory usage high, consider using smaller chunks")
+
+# 7. DECORATORS
 def handle_errors(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
         except discord.errors.Forbidden as e:
-            print(f"Permission error: {e}")
+            logger.error(f"Permission error: {e}")
             if hasattr(args[0], 'channel'):
                 await args[0].channel.send("❌ I don't have the required permissions!")
         except discord.errors.HTTPException as e:
-            print(f"Discord API error: {e}")
+            logger.error(f"Discord API error: {e}")
             if hasattr(args[0], 'channel'):
                 await args[0].channel.send("❌ Discord API error. Please try again later.")
         except Exception as e:
-            print(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error: {e}")
             if hasattr(args[0], 'channel'):
                 await args[0].channel.send(f"❌ An error occurred: {str(e)}")
     return wrapper
 
-# Add timeout handler
-async def wait_for_response(client, message, check, timeout=30):
-    try:
-        return await client.wait_for("message", check=check, timeout=timeout)
-    except asyncio.TimeoutError:
-        await message.channel.send("⏰ Timeout: You took too long to respond.")
-        return None
-
-# Add validation function
-def validate_date_range(start_date_str, end_date_str):
-    try:
-        start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-        end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-        if start_date > end_date:
-            return None, None, "Start date must be before end date"
-        if end_date > datetime.now():
-            return None, None, "End date cannot be in the future"
-        return start_date, end_date, None
-    except ValueError:
-        return None, None, "Invalid date format. Use YYYY-MM-DD"
-
-@client.event
-@handle_errors
-async def on_ready():
-    print(f'Bot connected as {client.user}')
-
-@client.event
-@handle_errors
-async def on_message(message):
-    print(f"Message received: {repr(message.content)}")
-
-    if message.author == client.user:
-        print("Ignored bot's own message.")
-        return
-
-    if message.content.strip().lower() == '!test':
-        await message.channel.send("Bot is working!")
-        return
-
-    if message.content.strip().lower() in ['!extract', '!extractcsv']:
-        print("Extract command recognized!")
-        try:
-            # Add memory check
-            available_memory = psutil.virtual_memory().available / (1024 * 1024)  # MB
-            if available_memory < 100:  # Less than 100MB available
-                await message.channel.send("⚠️ Warning: Low memory available. Consider using smaller chunks.")
-
-            # Add rate limit check
-            if hasattr(client, '_last_export_time'):
-                time_since_last = time.time() - client._last_export_time
-                if time_since_last < 5:  # 5 seconds cooldown
-                    await message.channel.send("⏳ Please wait a few seconds between exports.")
-                    return
-            client._last_export_time = time.time()
-
-            await message.channel.send("Processing your request...")
-
-            # Check if message is from a guild (server)
-            if not message.guild:
-                await message.channel.send("This command can only be used in a server!")
-                return
-
-            guild = message.guild
-            channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_messages]
-            
-            if not channels:
-                await message.channel.send("No accessible text channels found.")
-                return
-
-            channel_list = "\n".join(f"{idx + 1}. {ch.name}" for idx, ch in enumerate(channels))
-            await message.channel.send(f"Select a channel by typing the number:\n{channel_list}")
-
-            def check(m):
-                return m.author == message.author and m.channel == message.channel and m.content.isdigit()
-
-            try:
-                reply = await client.wait_for("message", check=check, timeout=30)
-                channel_index = int(reply.content) - 1
-            except TimeoutError:
-                await message.channel.send("Timeout: You took too long to respond.")
-                return
-            except ValueError:
-                await message.channel.send("Please enter a valid number.")
-                return
-
-            if channel_index < 0 or channel_index >= len(channels):
-                await message.channel.send("Invalid channel number. Please try again.")
-                return
-
-            selected_channel = channels[channel_index]
-
-            # Check permissions for selected channel
-            if not selected_channel.permissions_for(guild.me).read_message_history:
-                await message.channel.send("I don't have permission to read messages in that channel!")
-                return
-
-            await message.channel.send("Enter the role name to filter messages:")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-            except TimeoutError:
-                await message.channel.send("Timeout: You took too long to respond.")
-                return
-
-            role_name = reply.content
-            role = discord.utils.get(guild.roles, name=role_name)
-
-            if not role:
-                await message.channel.send(f'Role "{role_name}" not found.')
-                return
-
-            # Multiple role selection
-            await message.channel.send("Enter role names to filter messages (separate with commas, or press Enter to keep current role):")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                if reply.content.strip():
-                    role_names = [name.strip() for name in reply.content.split(',')]
-                    roles = [discord.utils.get(guild.roles, name=name) for name in role_names]
-                    # Remove None values for roles that weren't found
-                    roles = [r for r in roles if r]
-                    if not roles:
-                        await message.channel.send("No valid roles found. Using originally selected role.")
-                        roles = [role]
-                else:
-                    roles = [role]
-            except TimeoutError:
-                roles = [role]
-
-            # Category filtering
-            categories = guild.categories
-            if categories:
-                category_list = "\n".join(f"{idx + 1}. {cat.name}" for idx, cat in enumerate(categories))
-                await message.channel.send(f"Filter by category? Select a number or press Enter to skip:\n{category_list}")
-                try:
-                    reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                    if reply.content.strip().isdigit():
-                        cat_index = int(reply.content) - 1
-                        if 0 <= cat_index < len(categories):
-                            selected_category = categories[cat_index]
-                            if selected_channel not in selected_category.channels:
-                                await message.channel.send("Selected channel is not in this category. Proceeding without category filter.")
-                                selected_category = None
-                        else:
-                            await message.channel.send("Invalid category. Proceeding without category filter.")
-                            selected_category = None
-                    else:
-                        selected_category = None
-                except TimeoutError:
-                    selected_category = None
-
-            # Message content search
-            await message.channel.send("Enter search terms (optional - press Enter to skip):")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                search_terms = reply.content.strip().lower()
-            except TimeoutError:
-                search_terms = ""
-
-            # Add pins option to the export options
-            await message.channel.send("Select additional data to export (Enter numbers separated by spaces):\n"
-                                     "1. Attachments URLs\n"
-                                     "2. Message Reactions\n"
-                                     "3. Reply References\n"
-                                     "4. Message Edits\n"
-                                     "5. Message Embeds\n"
-                                     "6. Pinned Status")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                options = [int(x) for x in reply.content.split() if x.isdigit() and 0 < int(x) < 7]
-            except (TimeoutError, ValueError):
-                options = []
-
-            await message.channel.send("Enter date range (optional - press Enter to skip):\nFormat: YYYY-MM-DD YYYY-MM-DD (start end)")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                date_range = reply.content.strip()
-                
-                if date_range:
-                    try:
-                        start_date, end_date = date_range.split()
-                        start_date = datetime.strptime(start_date, '%Y-%m-%d')
-                        end_date = datetime.strptime(end_date, '%Y-%m-%d')
-                    except ValueError:
-                        await message.channel.send("Invalid date format. Proceeding without date filter.")
-                        date_range = None
-            except TimeoutError:
-                date_range = None
-
-            # Ask for chunk size preference
-            await message.channel.send("Enter maximum messages per file (default: 10000, enter 0 for no limit):")
-            try:
-                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
-                chunk_size = int(reply.content) if reply.content.strip().isdigit() else 10000
-            except (TimeoutError, ValueError):
-                chunk_size = 10000
-
-            # If date range is specified, split into smaller ranges if needed
-            if date_range:
-                try:
-                    current_date = start_date
-                    while current_date <= end_date:
-                        next_date = min(current_date + timedelta(days=30), end_date)
-                        
-                        await message.channel.send(f"Collecting messages from {current_date.date()} to {next_date.date()}...")
-                        messages = []
-                        message_count = 0
-                        progress_message = await message.channel.send("Progress: 0 messages processed...")
-                        
-                        try:
-                            async for msg in selected_channel.history(
-                                limit=None,
-                                after=current_date,
-                                before=next_date + timedelta(days=1)
-                            ):
-                                message_count += 1
-                                if message_count % 100 == 0:  # Update every 100 messages
-                                    await progress_message.edit(content=f"Progress: {message_count} messages processed...")
-                                
-                                # Check if message author has any of the selected roles
-                                member = guild.get_member(msg.author.id)
-                                if member and any(role in member.roles for role in roles):
-                                    # Apply category filter
-                                    if selected_category and selected_channel not in selected_category.channels:
-                                        continue
-
-                                    # Apply content search filter
-                                    if search_terms and search_terms not in msg.content.lower():
-                                        continue
-
-                                    # Apply date filter
-                                    if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
-                                        continue
-                                    
-                                    message_data = {
-                                        'Author': str(msg.author),
-                                        'Content': msg.content,
-                                        'Timestamp': msg.created_at.isoformat()
-                                    }
-                                    
-                                    # Add optional data based on user selection
-                                    if 1 in options:  # Attachments URLs
-                                        message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
-                                        
-                                    if 2 in options:  # Message Reactions
-                                        reactions = []
-                                        for reaction in msg.reactions:
-                                            reactions.append(f"{reaction.emoji}: {reaction.count}")
-                                        message_data['Reactions'] = ', '.join(reactions)
-                                        
-                                    if 3 in options:  # Reply References
-                                        if msg.reference and isinstance(msg.reference.resolved, discord.Message):
-                                            message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
-                                        else:
-                                            message_data['Replying_To'] = ''
-                                            
-                                    if 4 in options:  # Message Edits
-                                        message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
-
-                                    if 5 in options:  # Message Embeds
-                                        embeds_data = []
-                                        for embed in msg.embeds:
-                                            embed_info = {
-                                                'title': embed.title,
-                                                'description': embed.description,
-                                                'url': embed.url
-                                            }
-                                            embeds_data.append(str(embed_info))
-                                        message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
-
-                                    if 6 in options:  # Pinned Status
-                                        message_data['Pinned'] = str(msg.pinned)
-                                        
-                                    messages.append(message_data)
-
-                                # Auto-save when chunk_size is reached
-                                if chunk_size > 0 and len(messages) >= chunk_size:
-                                    await save_and_send_messages(
-                                        messages, 
-                                        selected_channel.name,
-                                        current_date.strftime('%Y%m%d'),
-                                        message.content.strip().lower() == '!extractcsv',
-                                        chunk_size,
-                                        message
-                                    )
-                                    messages = []  # Clear for next chunk
-                                
-                        except discord.Forbidden:
-                            await message.channel.send("I don't have permission to read message history!")
-                            return
-                            
-                        current_date = next_date + timedelta(days=1)
-                        if current_date <= end_date:
-                            await message.channel.send("Waiting 5 seconds before next batch...")
-                            await asyncio.sleep(5)  # Avoid rate limits
-                
-                except Exception as e:
-                    await message.channel.send(f"Error during date-based export: {str(e)}")
-                    return
-                    
-            else:
-                # Regular export without date splitting
-                messages = []
-                message_count = 0
-                progress_message = await message.channel.send("Progress: 0 messages processed...")
-                
-                try:
-                    async for msg in selected_channel.history(limit=None):
-                        message_count += 1
-                        if message_count % 100 == 0:  # Update every 100 messages
-                            await progress_message.edit(content=f"Progress: {message_count} messages processed...")
-                        
-                        # Check if message author has any of the selected roles
-                        member = guild.get_member(msg.author.id)
-                        if member and any(role in member.roles for role in roles):
-                            # Apply category filter
-                            if selected_category and selected_channel not in selected_category.channels:
-                                continue
-
-                            # Apply content search filter
-                            if search_terms and search_terms not in msg.content.lower():
-                                continue
-
-                            # Apply date filter
-                            if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
-                                continue
-                            
-                            message_data = {
-                                'Author': str(msg.author),
-                                'Content': msg.content,
-                                'Timestamp': msg.created_at.isoformat()
-                            }
-                            
-                            # Add optional data based on user selection
-                            if 1 in options:  # Attachments URLs
-                                message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
-                                
-                            if 2 in options:  # Message Reactions
-                                reactions = []
-                                for reaction in msg.reactions:
-                                    reactions.append(f"{reaction.emoji}: {reaction.count}")
-                                message_data['Reactions'] = ', '.join(reactions)
-                                
-                            if 3 in options:  # Reply References
-                                if msg.reference and isinstance(msg.reference.resolved, discord.Message):
-                                    message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
-                                else:
-                                    message_data['Replying_To'] = ''
-                                    
-                            if 4 in options:  # Message Edits
-                                message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
-
-                            if 5 in options:  # Message Embeds
-                                embeds_data = []
-                                for embed in msg.embeds:
-                                    embed_info = {
-                                        'title': embed.title,
-                                        'description': embed.description,
-                                        'url': embed.url
-                                    }
-                                    embeds_data.append(str(embed_info))
-                                message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
-
-                            if 6 in options:  # Pinned Status
-                                message_data['Pinned'] = str(msg.pinned)
-                                
-                            messages.append(message_data)
-
-                            # Auto-save when chunk_size is reached
-                            if chunk_size > 0 and len(messages) >= chunk_size:
-                                await save_and_send_messages(
-                                    messages,
-                                    selected_channel.name,
-                                    "final",
-                                    message.content.strip().lower() == '!extractcsv',
-                                    chunk_size,
-                                    message
-                                )
-                                messages = []  # Clear for next chunk
-                            
-                except discord.Forbidden:
-                    await message.channel.send("I don't have permission to read message history!")
-                    return
-
-                # Save any remaining messages
-                if messages:
-                    await save_and_send_messages(
-                        messages,
-                        selected_channel.name,
-                        "final",
-                        message.content.strip().lower() == '!extractcsv',
-                        chunk_size,
-                        message
-                    )
-
-            # Add better error messages for common issues
-            if not messages:
-                await message.channel.send("ℹ️ No messages found matching your criteria.")
-                return
-
-            if len(messages) > 50000 and not is_csv:
-                await message.channel.send("⚠️ Large export detected. Switching to CSV format for better performance.")
-                is_csv = True
-
-        except Exception as e:
-            await message.channel.send(f"❌ Export failed: {str(e)}")
-            print(f"Export error: {e}")
-            traceback.print_exc()
-
-    if message.content.strip().lower() == '!help':
-        help_text = """
-        **Available Commands:**
-        `!extract` - Export messages to Excel
-        `!extractcsv` - Export messages to CSV
-        `!test` - Check if bot is working
-        
-        **Export Features:**
-        - Filter by multiple roles
-        - Filter by category
-        - Search message content
-        - Optional date range
-        - Multiple file formats
-        - Additional data options including:
-          • Attachments
-          • Reactions
-          • Reply References
-          • Message Edits
-          • Message Embeds
-          • Pinned Status
-        
-        **Usage:**
-        1. Type !extract or !extractcsv
-        2. Select a channel
-        3. Enter role name(s)
-        4. Select category (optional)
-        5. Enter search terms (optional)
-        6. Select additional data to export
-        7. Enter date range (optional)
-        """
-        await message.channel.send(help_text)
-        return
-
-# Add retry decorator for API calls
 def retry_on_error(retries=3, delay=1):
     def decorator(func):
         async def wrapper(*args, **kwargs):
@@ -535,160 +249,734 @@ def retry_on_error(retries=3, delay=1):
         return wrapper
     return decorator
 
-# Modify save_and_send_messages function
-@retry_on_error()
-async def save_and_send_messages(messages, channel_name, suffix, is_csv, chunk_size, original_message):
-    """Helper function with improved error handling and retries"""
+def command_cooldown(cooldown_seconds=5):
+    def decorator(func):
+        last_used = {}
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            user_id = interaction.user.id
+            current_time = time.time()
+            if user_id in last_used and current_time - last_used[user_id] < cooldown_seconds:
+                remaining = int(cooldown_seconds - (current_time - last_used[user_id]))
+                await interaction.response.send_message(
+                    f"⏳ Please wait {remaining} seconds before using this command again.",
+                    ephemeral=True
+                )
+                return
+            last_used[user_id] = current_time
+            return await func(interaction, *args, **kwargs)
+        return wrapper
+    return decorator
+
+# 8. HELPER FUNCTIONS
+async def process_message_filters(msg, role, category, channel, search, date_from, date_to):
+    """Process all message filters"""
     try:
-        if not messages:
-            return
+        # Role check
+        member = msg.guild.get_member(msg.author.id)
+        if not member or role not in member.roles:
+            return False
 
-        # Add file size check before processing
-        estimated_size = len(str(messages)) / 1024  # Rough size estimate in KB
-        if estimated_size > 7000:  # Close to Discord's 8MB limit
-            await original_message.channel.send("⚠️ Large file detected, using compression...")
-            
-        # Clean message data
-        cleaned_messages = []
-        for msg in messages:
+        # Category check
+        if category and channel not in category.channels:
+            return False
+
+        # Search check
+        if search and search.lower() not in msg.content.lower():
+            return False
+
+        # Date check
+        if date_from and date_to:
             try:
-                # Remove invalid characters and normalize data
-                msg['Content'] = msg['Content'].replace('\x00', '').strip()
-                msg['Author'] = msg['Author'].replace('\x00', '').strip()
-                cleaned_messages.append(msg)
-            except Exception as e:
-                logger.error(f"Message cleaning error: {e}")
-                continue
+                start_date = datetime.strptime(date_from, '%Y-%m-%d')
+                end_date = datetime.strptime(date_to, '%Y-%m-%d')
+                if not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
+                    return False
+            except ValueError:
+                logger.error("Date parsing error")
+                return False
 
-        file_extension = 'csv' if is_csv else 'xlsx'
-        base_filename = f'{channel_name}_messages_{suffix}.{file_extension}'
-        zip_filename = f'{channel_name}_messages_{suffix}.zip'
-        
-        # Create ZIP file in memory with error handling
-        zip_buffer = io.BytesIO()
-        try:
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                df = pd.DataFrame(cleaned_messages)
-                if is_csv:
-                    csv_buffer = io.StringIO()
-                    df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
-                    zip_file.writestr(base_filename, csv_buffer.getvalue())
+        return True
+    except Exception as e:
+        logger.error(f"Filter error: {e}")
+        return False
+
+async def create_message_data(msg, data_options):
+    """Create message data with selected options"""
+    try:
+        message_data = {
+            'Author': str(msg.author),
+            'Content': msg.content,
+            'Timestamp': msg.created_at.isoformat()
+        }
+
+        if data_options:
+            options = [int(x.strip()) for x in data_options.split(',') if x.strip().isdigit() and 0 < int(x.strip()) < 7]
+            
+            if 1 in options:  # Attachments
+                message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
+            
+            if 2 in options:  # Reactions
+                reactions = [f"{r.emoji}: {r.count}" for r in msg.reactions]
+                message_data['Reactions'] = ', '.join(reactions)
+            
+            if 3 in options:  # Reply References
+                if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+                    message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
                 else:
-                    excel_buffer = io.BytesIO()
-                    df.to_excel(excel_buffer, index=False, engine='openpyxl')
-                    zip_file.writestr(base_filename, excel_buffer.getvalue())
+                    message_data['Replying_To'] = ''
+            
+            if 4 in options:  # Edits
+                message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+            
+            if 5 in options:  # Embeds
+                embeds_data = []
+                for embed in msg.embeds:
+                    embed_info = {
+                        'title': embed.title,
+                        'description': embed.description,
+                        'url': embed.url
+                    }
+                    embeds_data.append(str(embed_info))
+                message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+            
+            if 6 in options:  # Pinned
+                message_data['Pinned'] = str(msg.pinned)
+
+        return message_data
+    except Exception as e:
+        logger.error(f"Message data creation error: {e}")
+        return None
+
+class SafeBuffer:
+    """Context manager for safe buffer handling"""
+    def __init__(self):
+        self.buffers = []
+
+    def create_buffer(self, buffer_type=io.BytesIO):
+        buffer = buffer_type()
+        self.buffers.append(buffer)
+        return buffer
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for buffer in self.buffers:
+            try:
+                buffer.close()
+            except:
+                pass
+
+# Use in save_and_send_messages
+async def save_and_send_messages(messages, channel_name, suffix, is_csv, chunk_size, original_message):
+    with SafeBuffer() as safe_buffer:
+        try:
+            if not messages:
+                return
+
+            # Add file size check before processing
+            estimated_size = len(str(messages)) / 1024  # Rough size estimate in KB
+            if estimated_size > 7000:  # Close to Discord's 8MB limit
+                await original_message.channel.send("⚠️ Large file detected, using compression...")
+            
+            # Clean message data
+            cleaned_messages = []
+            for msg in messages:
+                try:
+                    # Remove invalid characters and normalize data
+                    msg['Content'] = msg['Content'].replace('\x00', '').strip()
+                    msg['Author'] = msg['Author'].replace('\x00', '').strip()
+                    cleaned_messages.append(msg)
+                except Exception as e:
+                    logger.error(f"Message cleaning error: {e}")
+                    continue
+
+            file_extension = 'csv' if is_csv else 'xlsx'
+            base_filename = f'{channel_name}_messages_{suffix}.{file_extension}'
+            zip_filename = f'{channel_name}_messages_{suffix}.zip'
+            
+            # Create ZIP file in memory with error handling
+            zip_buffer = safe_buffer.create_buffer()
+            try:
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    df = pd.DataFrame(cleaned_messages)
+                    if is_csv:
+                        csv_buffer = safe_buffer.create_buffer(io.StringIO)
+                        df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
+                        zip_file.writestr(base_filename, csv_buffer.getvalue())
+                    else:
+                        excel_buffer = safe_buffer.create_buffer(io.BytesIO)
+                        df.to_excel(excel_buffer, index=False, engine='openpyxl')
+                        zip_file.writestr(base_filename, excel_buffer.getvalue())
+            except Exception as e:
+                logger.error(f"Compression error: {e}")
+                raise
+
+            # Check file size before sending
+            zip_buffer.seek(0, os.SEEK_END)
+            size = zip_buffer.tell()
+            zip_buffer.seek(0)
+            
+            if size > 8 * 1024 * 1024:  # 8MB
+                raise ValueError("File too large for Discord upload")
+
+            await original_message.channel.send(
+                f'Extracted {len(cleaned_messages)} messages from "{channel_name}" (compressed).',
+                file=discord.File(zip_buffer, filename=zip_filename)
+            )
+            
+        except discord.errors.HTTPException as e:
+            error_msg = "File too large. Try reducing the chunk size or using CSV format." if e.code == 40005 else f"Discord error: {str(e)}"
+            await original_message.channel.send(f"❌ {error_msg}")
+            logger.error(f"HTTP error: {e}")
         except Exception as e:
-            logger.error(f"Compression error: {e}")
+            await original_message.channel.send(f"❌ Error saving/sending file: {str(e)}")
+            logger.error(f"Save/send error: {e}", exc_info=True)
             raise
 
-        # Check file size before sending
-        zip_buffer.seek(0, os.SEEK_END)
-        size = zip_buffer.tell()
-        zip_buffer.seek(0)
+# Add to helper functions
+async def estimate_message_count(channel: discord.TextChannel, role=None, after=None, before=None) -> int:
+    """Estimate total messages for progress tracking"""
+    try:
+        count = 0
+        sample_size = 1000
+        async for msg in channel.history(limit=sample_size):
+            if role and not any(role == r for r in msg.author.roles):
+                continue
+            if after and msg.created_at < after:
+                continue
+            if before and msg.created_at > before:
+                continue
+            count += 1
         
-        if size > 8 * 1024 * 1024:  # 8MB
-            raise ValueError("File too large for Discord upload")
+        # Estimate total based on sample
+        total_seconds = (before or datetime.now()) - (after or channel.created_at)
+        sample_seconds = timedelta(days=7)
+        ratio = total_seconds / sample_seconds
+        estimated_total = int(count * ratio)
+        return min(estimated_total, 1000000)  # Cap at 1M for safety
+    except Exception as e:
+        logger.error(f"Error estimating messages: {e}")
+        return None
 
-        await original_message.channel.send(
-            f'Extracted {len(cleaned_messages)} messages from "{channel_name}" (compressed).',
-            file=discord.File(zip_buffer, filename=zip_filename)
+# 9. BOT INITIALIZATION
+client = None
+
+# Initialize bot after all definitions
+async def initialize():
+    """Async initialization"""
+    try:
+        client = ExporterBot()
+        BotInstance.set_instance(client)
+        
+        # Initialize any async resources
+        client._session = aiohttp.ClientSession()
+        
+        return client
+    except Exception as e:
+        logger.error(f"Initialization error: {e}")
+        raise
+
+# 10. EVENT HANDLERS
+@client.event
+@handle_errors
+async def on_ready():
+    print(f'Bot connected as {client.user}')
+
+@client.tree.error
+async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏳ Command is on cooldown. Try again in {error.retry_after:.1f}s",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ You don't have permission to use this command.",
+            ephemeral=True
+        )
+    else:
+        logger.error(f"Command error: {error}")
+        await interaction.response.send_message(
+            "❌ An error occurred while processing the command.",
+            ephemeral=True
+        )
+
+# 11. SLASH COMMANDS
+@client.tree.command(name="export", description="Export messages to Excel/CSV format")
+@app_commands.describe(
+    format="Choose export format (Excel or CSV)",
+    channel="Select channel to export from",
+    role="Primary role to filter messages",
+    category="Optional: Filter by channel category",
+    search="Optional: Search terms in messages",
+    date_from="Optional: Start date (YYYY-MM-DD)",
+    date_to="Optional: End date (YYYY-MM-DD)",
+    chunk_size="Optional: Messages per file (default: 10000)",
+    data_options="Optional: Additional data options (comma-separated numbers 1-6)"
+)
+@app_commands.choices(format=[
+    app_commands.Choice(name="Excel", value="excel"),
+    app_commands.Choice(name="CSV", value="csv")
+])
+@command_cooldown(10)  # 10 second cooldown
+async def export(
+    interaction: discord.Interaction,
+    format: Literal["excel", "csv"],
+    channel: discord.TextChannel,
+    role: discord.Role,
+    category: Optional[discord.CategoryChannel] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    chunk_size: Optional[int] = 10000,
+    data_options: Optional[str] = None
+):
+    try:
+        # Create export task and track user
+        task = asyncio.current_task()
+        task.user_id = interaction.user.id
+        task.start_time = time.time()  # Add timing
+        client._active_exports.add(task)
+        
+        # Memory and cooldown checks
+        if not await client.check_memory():
+            await interaction.response.send_message("⚠️ Low memory available. Try smaller chunk size.")
+            return
+
+        if not await client.can_export():
+            await interaction.response.send_message("⏳ Please wait a few seconds between exports.")
+            return
+
+        await interaction.response.send_message("Processing your request...")
+        message = await interaction.original_response()
+        
+        # Initialize progress tracker
+        progress = ProgressTracker(message)
+        
+        # Initialize chunker
+        chunker = MessageChunker(chunk_size)
+        
+        # Process messages
+        async for msg in channel.history(limit=None):
+            await progress.update()
+            
+            if not await process_message_filters(msg, role, category, channel, search, date_from, date_to):
+                continue
+
+            message_data = await create_message_data(msg, data_options)
+            if message_data:
+                await chunker.add_message(message_data, channel.name, format == "csv", message)
+
+        # Save any remaining messages
+        await chunker.finish(channel.name, format == "csv", message)
+
+    except Exception as e:
+        await message.channel.send(f"❌ Export failed: {str(e)}")
+        logger.error(f"Export error: {e}", exc_info=True)
+    finally:
+        client._active_exports.discard(task)
+
+@client.tree.command(name="help", description="Show detailed help information")
+async def help(interaction: discord.Interaction):
+    """Show detailed help information"""
+    try:
+        embed = discord.Embed(
+            title="Discord Message Exporter Help",
+            description="Detailed guide on how to use the bot",
+            color=discord.Color.blue()
         )
         
-    except discord.errors.HTTPException as e:
-        error_msg = "File too large. Try reducing the chunk size or using CSV format." if e.code == 40005 else f"Discord error: {str(e)}"
-        await original_message.channel.send(f"❌ {error_msg}")
-        logger.error(f"HTTP error: {e}")
+        # Export Options
+        embed.add_field(
+            name="Export Options",
+            value="""
+            **Required:**
+            • `format` - Choose 'excel' or 'csv'
+            • `channel` - Channel to export from
+            • `role` - Role to filter messages by
+            
+            **Optional:**
+            • `category` - Filter by category
+            • `search` - Search in messages
+            • `date_from` - Start date (YYYY-MM-DD)
+            • `date_to` - End date (YYYY-MM-DD)
+            • `chunk_size` - Messages per file
+            """,
+            inline=False
+        )
+        
+        # Data Options
+        embed.add_field(
+            name="Additional Data Options",
+            value="""
+            Use numbers 1-6 separated by commas:
+            1. Attachments URLs
+            2. Message Reactions
+            3. Reply References
+            4. Message Edits
+            5. Message Embeds
+            6. Pinned Status
+            
+            Example: `1,2,4` for attachments, reactions, and edits
+            """,
+            inline=False
+        )
+        
+        # Examples
+        embed.add_field(
+            name="Example Usage",
+            value="""
+            Basic export:
+            `/export format:csv channel:#general role:@Member`
+            
+            Advanced export:
+            `/export format:excel channel:#announcements role:@Mod category:Important search:update date_from:2023-01-01 date_to:2023-12-31 chunk_size:5000 data_options:1,2,3`
+            """,
+            inline=False
+        )
+        
+        embed.set_footer(text="Use /commands to see all available commands")
+        
+        await interaction.response.send_message(embed=embed)
     except Exception as e:
-        await original_message.channel.send(f"❌ Error saving/sending file: {str(e)}")
-        logger.error(f"Save/send error: {e}", exc_info=True)
+        logger.error(f"Help error: {e}")
+        await interaction.response.send_message("❌ Error showing help information")
 
-def process_message_batch(messages):
-    """Process a batch of messages in parallel"""
-    df = pd.DataFrame(messages)
-    return df
+@client.tree.command(name="test", description="Check if bot is working")
+async def test(interaction: discord.Interaction):
+    await interaction.response.send_message("✅ Bot is working!")
 
-async def save_large_export(messages, chunk_size=1000):
-    """Process large exports in parallel"""
-    chunks = [messages[i:i + chunk_size] for i in range(0, len(messages), chunk_size)]
-    
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ProcessPoolExecutor() as pool:
-        # Process chunks in parallel
-        tasks = [
-            loop.run_in_executor(
-                pool, 
-                functools.partial(process_message_batch, chunk)
-            )
-            for chunk in chunks
-        ]
-        results = await asyncio.gather(*tasks)
-    
-    # Combine results
-    return pd.concat(results)
+@client.tree.command(name="status", description="Show bot status")
+async def status(interaction: discord.Interaction):
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
 
-async def get_message_density(channel, start_date, end_date):
-    """Estimate message density to optimize chunk size"""
-    sample_messages = []
-    async for msg in channel.history(
-        limit=100,
-        after=start_date,
-        before=end_date
-    ):
-        sample_messages.append(msg.created_at)
+    memory = psutil.virtual_memory()
+    active_exports = len(client._active_exports)
     
-    if not sample_messages:
-        return 30  # Default chunk size in days
-    
-    # Calculate average messages per day
-    msg_count = len(sample_messages)
-    days_span = (max(sample_messages) - min(sample_messages)).days or 1
-    density = msg_count / days_span
-    
-    # Adjust chunk size based on density
-    if density > 1000:  # Very active channel
-        return 7  # Weekly chunks
-    elif density > 100:
-        return 14  # Bi-weekly chunks
+    status_text = f"""
+    **Bot Status**
+    Memory Usage: {memory.percent}%
+    Active Exports: {active_exports}
+    Uptime: {time.time() - client._start_time:.0f} seconds
+    """
+    await interaction.response.send_message(status_text)
+
+@client.tree.command(name="cancel", description="Cancel ongoing exports")
+@command_cooldown(5)
+async def cancel(interaction: discord.Interaction):
+    """Cancel all active exports for the user"""
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
+
+    cancelled = 0
+    for task in client._active_exports.copy():
+        if hasattr(task, 'user_id') and task.user_id == interaction.user.id:
+            task.cancel()
+            client._active_exports.discard(task)
+            cancelled += 1
+
+    if cancelled:
+        await interaction.response.send_message(f"✅ Cancelled {cancelled} active export(s)")
     else:
-        return 30  # Monthly chunks
+        await interaction.response.send_message("❌ No active exports found")
 
-async def process_messages_generator(channel, roles, options, start_date=None, end_date=None):
-    """Generator function for memory-efficient message processing"""
-    async for msg in channel.history(limit=None, after=start_date, before=end_date):
-        # Process one message at a time
-        message_data = await process_single_message(msg, roles, options)
-        if message_data:
-            yield message_data
+@client.tree.command(name="cleanup", description="Force cleanup (Admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def cleanup(interaction: discord.Interaction):
+    """Force cleanup of resources"""
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
 
-async def process_single_message(msg, roles, options):
-    """Process a single message with minimal memory usage"""
-    member = msg.guild.get_member(msg.author.id)
-    if not member or not any(role in member.roles for role in roles):
-        return None
+    try:
+        await interaction.response.send_message("🧹 Starting cleanup...")
+        message = await interaction.original_response()
         
-    # Basic message data
-    message_data = {
-        'Author': str(msg.author),
-        'Content': msg.content,
-        'Timestamp': msg.created_at.isoformat()
-    }
-    
-    # Add selected options
-    if options:
-        # Add only requested data
-        pass
+        # Cancel all exports
+        export_count = len(client._active_exports)
+        for task in client._active_exports.copy():
+            task.cancel()
+        client._active_exports.clear()
         
-    return message_data
+        # Force garbage collection
+        clear_memory()
+        
+        memory_before = psutil.virtual_memory().percent
+        memory_after = psutil.virtual_memory().percent
+        
+        await message.edit(content=f"""
+        ✅ Cleanup complete:
+        • Cancelled exports: {export_count}
+        • Memory usage: {memory_before}% → {memory_after}%
+        """)
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+        await interaction.followup.send("❌ Error during cleanup")
 
-# Add memory management
-def clear_memory():
-    """Force garbage collection"""
-    import gc
-    gc.collect()
-    
-# Add this to the message processing loop
-if message_count % 1000 == 0:
-    clear_memory()
+@client.tree.command(name="restart", description="Restart the bot (Admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def restart(interaction: discord.Interaction):
+    """Restart the bot"""
+    try:
+        await interaction.response.send_message("🔄 Restarting bot...")
+        client = BotInstance.get_instance()
+        if client:
+            await client.cleanup()
+            await client.close()
+        
+        # Re-initialize
+        new_client = await initialize()
+        BotInstance.set_instance(new_client)
+        
+        await interaction.followup.send("✅ Bot restarted successfully")
+    except Exception as e:
+        logger.error(f"Restart error: {e}")
+        await interaction.followup.send("❌ Error during restart")
 
-# Run the bot
-client.run(TOKEN)
+@client.tree.command(name="stats", description="Show export statistics")
+async def stats(interaction: discord.Interaction):
+    """Show export statistics"""
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
+
+    try:
+        # Get stats
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent()
+        active_exports = len(client._active_exports)
+        uptime = time.time() - client._start_time
+        
+        # Format uptime
+        days = int(uptime // (24 * 3600))
+        hours = int((uptime % (24 * 3600)) // 3600)
+        minutes = int((uptime % 3600) // 60)
+        
+        stats_text = f"""
+        **Bot Statistics**
+        🕒 Uptime: {days}d {hours}h {minutes}m
+        💾 Memory Usage: {memory.percent}%
+        💻 CPU Usage: {cpu_percent}%
+        📤 Active Exports: {active_exports}
+        """
+        await interaction.response.send_message(stats_text)
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        await interaction.response.send_message("❌ Error getting statistics")
+
+@client.tree.command(name="about", description="Show bot information")
+async def about(interaction: discord.Interaction):
+    """Show bot information"""
+    try:
+        embed = discord.Embed(
+            title="Discord Message Exporter",
+            description="A powerful bot for exporting Discord messages",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="Features",
+            value="• Excel/CSV export\n• Role filtering\n• Date range\n• Search\n• Attachments\n• Reactions",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Commands",
+            value="/help - Show commands\n/export - Export messages\n/status - Show status",
+            inline=False
+        )
+        
+        embed.set_footer(text="Use /help for detailed command usage")
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"About error: {e}")
+        await interaction.response.send_message("❌ Error showing bot information")
+
+@client.tree.command(name="progress", description="Show current export progress")
+async def progress(interaction: discord.Interaction):
+    """Show progress of current exports"""
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
+
+    try:
+        if not client._active_exports:
+            await interaction.response.send_message("No active exports")
+            return
+            
+        progress_text = "**Active Exports**\n"
+        for task in client._active_exports:
+            if hasattr(task, 'user_id'):
+                user = interaction.guild.get_member(task.user_id)
+                user_name = user.display_name if user else "Unknown"
+                progress_text += f"• Export by {user_name}\n"
+        
+        await interaction.response.send_message(progress_text)
+    except Exception as e:
+        logger.error(f"Progress error: {e}")
+        await interaction.response.send_message("❌ Error showing progress")
+
+@client.tree.command(name="commands", description="List all available commands")
+async def commands(interaction: discord.Interaction):
+    """Show all available commands with descriptions"""
+    try:
+        embed = discord.Embed(
+            title="Available Commands",
+            description="All available bot commands and their descriptions",
+            color=discord.Color.green()
+        )
+        
+        # Basic Commands
+        embed.add_field(
+            name="Basic Commands",
+            value="""
+            `/help` - Show detailed help
+            `/test` - Check if bot is working
+            `/about` - Show bot information
+            `/commands` - Show this list
+            """,
+            inline=False
+        )
+        
+        # Export Commands
+        embed.add_field(
+            name="Export Commands",
+            value="""
+            `/export` - Export messages (with options)
+            `/progress` - Show export progress
+            `/cancel` - Cancel your exports
+            """,
+            inline=False
+        )
+        
+        # Status Commands
+        embed.add_field(
+            name="Status Commands",
+            value="""
+            `/status` - Show bot status
+            `/stats` - Show detailed statistics
+            """,
+            inline=False
+        )
+        
+        # Admin Commands
+        embed.add_field(
+            name="Admin Commands",
+            value="""
+            `/cleanup` - Force cleanup (Admin)
+            `/restart` - Restart bot (Admin)
+            """,
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Commands list error: {e}")
+        await interaction.response.send_message("❌ Error showing commands list")
+
+@client.tree.command(name="queue", description="Show export queue status")
+async def queue(interaction: discord.Interaction):
+    """Show current export queue status"""
+    client = BotInstance.get_instance()
+    if not client:
+        await interaction.response.send_message("❌ Bot not initialized")
+        return
+
+    try:
+        if not client._active_exports:
+            await interaction.response.send_message("📭 Export queue is empty")
+            return
+            
+        queue_text = "**Export Queue Status**\n"
+        for i, task in enumerate(client._active_exports, 1):
+            if hasattr(task, 'user_id'):
+                user = interaction.guild.get_member(task.user_id)
+                user_name = user.display_name if user else "Unknown"
+                started_time = getattr(task, 'start_time', time.time())
+                duration = time.time() - started_time
+                queue_text += f"{i}. {user_name} - Running for {int(duration)}s\n"
+        
+        await interaction.response.send_message(queue_text)
+    except Exception as e:
+        logger.error(f"Queue error: {e}")
+        await interaction.response.send_message("❌ Error showing queue")
+
+@client.tree.command(name="version", description="Show bot version")
+async def version(interaction: discord.Interaction):
+    """Show bot version information"""
+    try:
+        embed = discord.Embed(
+            title="Discord Message Exporter",
+            description=f"Version {VERSION}",
+            color=discord.Color.blue()
+        )
+        
+        # System Info
+        py_version = sys.version.split()[0]
+        discord_version = discord.__version__
+        
+        embed.add_field(
+            name="System Information",
+            value=f"""
+            • Python: {py_version}
+            • Discord.py: {discord_version}
+            • OS: {os.name}
+            • Platform: {sys.platform}
+            """,
+            inline=False
+        )
+        
+        # Runtime Info
+        memory = psutil.virtual_memory()
+        embed.add_field(
+            name="Runtime Information",
+            value=f"""
+            • Memory Usage: {memory.percent}%
+            • CPU Cores: {psutil.cpu_count()}
+            • Process ID: {os.getpid()}
+            """,
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Version error: {e}")
+        await interaction.response.send_message("❌ Error showing version info")
+
+# Add after bot initialization
+def signal_handler(sig, frame):
+    """Handle shutdown signals"""
+    logger.info("Shutdown signal received")
+    if client:
+        logger.info("Cleaning up...")
+        asyncio.run_coroutine_threadsafe(client.close(), client.loop)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# 12. RUN BOT
+if __name__ == "__main__":
+    try:
+        # Initialize bot
+        client = asyncio.run(initialize())
+        
+        # Set up signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Run bot
+        client.run(TOKEN)
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+        sys.exit(1)
