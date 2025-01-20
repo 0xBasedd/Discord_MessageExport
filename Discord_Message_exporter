@@ -1,20 +1,41 @@
-this is what i used: 
-
 import discord
 import os
 import pandas as pd
 from dotenv import load_dotenv
+import sys
+from datetime import datetime
+import math
 
-# Load the environment variables
-load_dotenv()
+def check_env_file():
+    """Check if .env file exists and has required variables"""
+    if not os.path.exists('.env'):
+        print("Error: .env file not found!")
+        print("Please create a .env file with your DISCORD_TOKEN")
+        print("Example .env file:")
+        print("DISCORD_TOKEN=your_token_here")
+        sys.exit(1)
+
+# Load and validate environment variables
+check_env_file()
+load_dotenv(override=True)
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# Check if the token is loaded
+# Check if the token is loaded but don't print it
 if not TOKEN:
     print("Error: Discord token not found in .env file!")
-    exit()
+    print("Please add DISCORD_TOKEN=your_token_here to your .env file")
+    sys.exit(1)
 else:
-    print("Token loaded successfully.")
+    print("Token loaded successfully (token hidden for security)")
+
+# Add .env to .gitignore if it doesn't exist
+gitignore_path = '.gitignore'
+if not os.path.exists(gitignore_path):
+    with open(gitignore_path, 'w') as f:
+        f.write(".env\n")
+elif '.env' not in open(gitignore_path).read():
+    with open(gitignore_path, 'a') as f:
+        f.write("\n.env\n")
 
 # Define the bot with necessary intents
 intents = discord.Intents.default()
@@ -40,40 +61,57 @@ async def on_message(message):
         await message.channel.send("Bot is working!")
         return
 
-    if message.content.strip().lower() == '!extract':
+    if message.content.strip().lower() in ['!extract', '!extractcsv']:
         print("Extract command recognized!")
         try:
             await message.channel.send("Processing your request...")
 
-            guild = message.guild
-            if not guild:
-                print("Guild not found.")
+            # Check if message is from a guild (server)
+            if not message.guild:
+                await message.channel.send("This command can only be used in a server!")
                 return
 
-            channels = [ch for ch in guild.text_channels]
+            guild = message.guild
+            channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_messages]
+            
             if not channels:
-                print("No text channels found.")
+                await message.channel.send("No accessible text channels found.")
                 return
 
             channel_list = "\n".join(f"{idx + 1}. {ch.name}" for idx, ch in enumerate(channels))
             await message.channel.send(f"Select a channel by typing the number:\n{channel_list}")
 
             def check(m):
-                return m.author == message.author and m.channel == message.channel
+                return m.author == message.author and m.channel == message.channel and m.content.isdigit()
 
-            reply = await client.wait_for("message", check=check, timeout=30)
-            print(f"User input received: {reply.content}")
-
-            channel_index = int(reply.content) - 1
+            try:
+                reply = await client.wait_for("message", check=check, timeout=30)
+                channel_index = int(reply.content) - 1
+            except TimeoutError:
+                await message.channel.send("Timeout: You took too long to respond.")
+                return
+            except ValueError:
+                await message.channel.send("Please enter a valid number.")
+                return
 
             if channel_index < 0 or channel_index >= len(channels):
-                await message.channel.send("Invalid selection. Please try again.")
+                await message.channel.send("Invalid channel number. Please try again.")
                 return
 
             selected_channel = channels[channel_index]
 
+            # Check permissions for selected channel
+            if not selected_channel.permissions_for(guild.me).read_message_history:
+                await message.channel.send("I don't have permission to read messages in that channel!")
+                return
+
             await message.channel.send("Enter the role name to filter messages:")
-            reply = await client.wait_for("message", check=check, timeout=30)
+            try:
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+            except TimeoutError:
+                await message.channel.send("Timeout: You took too long to respond.")
+                return
+
             role_name = reply.content
             role = discord.utils.get(guild.roles, name=role_name)
 
@@ -81,35 +119,236 @@ async def on_message(message):
                 await message.channel.send(f'Role "{role_name}" not found.')
                 return
 
+            # Multiple role selection
+            await message.channel.send("Enter role names to filter messages (separate with commas, or press Enter to keep current role):")
+            try:
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                if reply.content.strip():
+                    role_names = [name.strip() for name in reply.content.split(',')]
+                    roles = [discord.utils.get(guild.roles, name=name) for name in role_names]
+                    # Remove None values for roles that weren't found
+                    roles = [r for r in roles if r]
+                    if not roles:
+                        await message.channel.send("No valid roles found. Using originally selected role.")
+                        roles = [role]
+                else:
+                    roles = [role]
+            except TimeoutError:
+                roles = [role]
+
+            # Category filtering
+            categories = guild.categories
+            if categories:
+                category_list = "\n".join(f"{idx + 1}. {cat.name}" for idx, cat in enumerate(categories))
+                await message.channel.send(f"Filter by category? Select a number or press Enter to skip:\n{category_list}")
+                try:
+                    reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                    if reply.content.strip().isdigit():
+                        cat_index = int(reply.content) - 1
+                        if 0 <= cat_index < len(categories):
+                            selected_category = categories[cat_index]
+                            if selected_channel not in selected_category.channels:
+                                await message.channel.send("Selected channel is not in this category. Proceeding without category filter.")
+                                selected_category = None
+                        else:
+                            await message.channel.send("Invalid category. Proceeding without category filter.")
+                            selected_category = None
+                    else:
+                        selected_category = None
+                except TimeoutError:
+                    selected_category = None
+
+            # Message content search
+            await message.channel.send("Enter search terms (optional - press Enter to skip):")
+            try:
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                search_terms = reply.content.strip().lower()
+            except TimeoutError:
+                search_terms = ""
+
+            # Add pins option to the export options
+            await message.channel.send("Select additional data to export (Enter numbers separated by spaces):\n"
+                                     "1. Attachments URLs\n"
+                                     "2. Message Reactions\n"
+                                     "3. Reply References\n"
+                                     "4. Message Edits\n"
+                                     "5. Message Embeds\n"
+                                     "6. Pinned Status")
+            try:
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                options = [int(x) for x in reply.content.split() if x.isdigit() and 0 < int(x) < 7]
+            except (TimeoutError, ValueError):
+                options = []
+
+            await message.channel.send("Enter date range (optional - press Enter to skip):\nFormat: YYYY-MM-DD YYYY-MM-DD (start end)")
+            try:
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                date_range = reply.content.strip()
+                
+                if date_range:
+                    try:
+                        start_date, end_date = date_range.split()
+                        start_date = datetime.strptime(start_date, '%Y-%m-%d')
+                        end_date = datetime.strptime(end_date, '%Y-%m-%d')
+                    except ValueError:
+                        await message.channel.send("Invalid date format. Proceeding without date filter.")
+                        date_range = None
+            except TimeoutError:
+                date_range = None
+
+            await message.channel.send("Collecting messages... This might take a while.")
             messages = []
-            async for msg in selected_channel.history(limit=None):
-                # Check if message author is a member and has the role
-                member = guild.get_member(msg.author.id)
-                if member and role in member.roles:
-                    messages.append({
-                        'Author': str(msg.author),
-                        'Content': msg.content,
-                        'Timestamp': msg.created_at.isoformat()
-                    })
+            message_count = 0
+            progress_message = await message.channel.send("Progress: 0 messages processed...")
+            try:
+                async for msg in selected_channel.history(limit=None):
+                    message_count += 1
+                    if message_count % 100 == 0:  # Update every 100 messages
+                        await progress_message.edit(content=f"Progress: {message_count} messages processed...")
+                    
+                    # Check if message author has any of the selected roles
+                    member = guild.get_member(msg.author.id)
+                    if member and any(role in member.roles for role in roles):
+                        # Apply category filter
+                        if selected_category and selected_channel not in selected_category.channels:
+                            continue
 
-            if messages:
-                filename = f'{selected_channel.name}_messages.xlsx'
-                print(f"Attempting to save file: {filename}")
-                df = pd.DataFrame(messages)
-                df.to_excel(filename, index=False)
-                await message.channel.send(
-                    f'Extracted {len(messages)} messages from "{selected_channel.name}".',
-                    file=discord.File(filename)
-                )
-                os.remove(filename)
-            else:
+                        # Apply content search filter
+                        if search_terms and search_terms not in msg.content.lower():
+                            continue
+
+                        # Apply date filter
+                        if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
+                            continue
+                            
+                        message_data = {
+                            'Author': str(msg.author),
+                            'Content': msg.content,
+                            'Timestamp': msg.created_at.isoformat()
+                        }
+                        
+                        # Add optional data based on user selection
+                        if 1 in options:  # Attachments URLs
+                            message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
+                            
+                        if 2 in options:  # Message Reactions
+                            reactions = []
+                            for reaction in msg.reactions:
+                                reactions.append(f"{reaction.emoji}: {reaction.count}")
+                            message_data['Reactions'] = ', '.join(reactions)
+                            
+                        if 3 in options:  # Reply References
+                            if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+                                message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
+                            else:
+                                message_data['Replying_To'] = ''
+                                
+                        if 4 in options:  # Message Edits
+                            message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+
+                        if 5 in options:  # Message Embeds
+                            embeds_data = []
+                            for embed in msg.embeds:
+                                embed_info = {
+                                    'title': embed.title,
+                                    'description': embed.description,
+                                    'url': embed.url
+                                }
+                                embeds_data.append(str(embed_info))
+                            message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+
+                        if 6 in options:  # Pinned Status
+                            message_data['Pinned'] = str(msg.pinned)
+                            
+                        messages.append(message_data)
+            except discord.Forbidden:
+                await message.channel.send("I don't have permission to read message history!")
+                return
+
+            if not messages:
                 await message.channel.send(f'No messages found for role "{role_name}".')
+                return
 
-        except ValueError:
-            await message.channel.send("Please provide valid inputs.")
+            try:
+                # Determine file format based on command
+                is_csv = message.content.strip().lower() == '!extractcsv'
+                file_extension = 'csv' if is_csv else 'xlsx'
+                filename = f'{selected_channel.name}_messages.{file_extension}'
+                print(f"Attempting to save file: {filename}")
+                
+                if len(messages) > 10000:  # If more than 10k messages
+                    # Split into multiple files
+                    chunk_size = 10000
+                    chunks = [messages[i:i + chunk_size] for i in range(0, len(messages), chunk_size)]
+                    
+                    for i, chunk in enumerate(chunks):
+                        filename = f'{selected_channel.name}_messages_part{i+1}.{file_extension}'
+                        df = pd.DataFrame(chunk)
+                        
+                        if is_csv:
+                            df.to_csv(filename, index=False, encoding='utf-8')
+                        else:
+                            df.to_excel(filename, index=False)
+                        
+                        await message.channel.send(
+                            f'Extracted {len(chunk)} messages from "{selected_channel.name}".',
+                            file=discord.File(filename)
+                        )
+                        os.remove(filename)
+                else:
+                    df = pd.DataFrame(messages)
+                    
+                    if is_csv:
+                        df.to_csv(filename, index=False, encoding='utf-8')
+                    else:
+                        df.to_excel(filename, index=False)
+                    
+                    await message.channel.send(
+                        f'Extracted {len(messages)} messages from "{selected_channel.name}".',
+                        file=discord.File(filename)
+                    )
+                    os.remove(filename)
+            except Exception as e:
+                await message.channel.send(f"Error creating file: {str(e)}")
+                if os.path.exists(filename):
+                    os.remove(filename)
+
         except Exception as e:
             print(f"An error occurred: {str(e)}")
             await message.channel.send(f"An error occurred: {str(e)}")
+
+    if message.content.strip().lower() == '!help':
+        help_text = """
+        **Available Commands:**
+        `!extract` - Export messages to Excel
+        `!extractcsv` - Export messages to CSV
+        `!test` - Check if bot is working
+        
+        **Export Features:**
+        - Filter by multiple roles
+        - Filter by category
+        - Search message content
+        - Optional date range
+        - Multiple file formats
+        - Additional data options including:
+          • Attachments
+          • Reactions
+          • Reply References
+          • Message Edits
+          • Message Embeds
+          • Pinned Status
+        
+        **Usage:**
+        1. Type !extract or !extractcsv
+        2. Select a channel
+        3. Enter role name(s)
+        4. Select category (optional)
+        5. Enter search terms (optional)
+        6. Select additional data to export
+        7. Enter date range (optional)
+        """
+        await message.channel.send(help_text)
+        return
 
 # Run the bot
 client.run(TOKEN)
