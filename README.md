@@ -617,3 +617,88 @@ This project is licensed under the MIT License - see the LICENSE file for detail
    - Use CSV instead of Excel
    - Reduce chunk size
    - Check permissions
+
+## Environment Setup
+
+### Local Environment
+1. Create `.env` file in project root:
+   ```
+   DISCORD_TOKEN=your_bot_token_here
+   ```
+
+### Railway.app Environment
+1. Add environment variable:
+   - Key: `DISCORD_TOKEN`
+   - Value: Your bot token
+2. No `.env` file needed on Railway
+
+## Deployment
+
+### Railway.app Setup Files
+Required files in repository:
+```
+requirements.txt    # Dependencies
+Procfile           # Start command
+runtime.txt        # Python version
+railway.toml       # Build config
+```
+
+### Common Deployment Issues
+
+1. **Build Errors**
+   ```
+   Could not generate build plan
+   ```
+   - Check all required files exist
+   - Verify file names are exact
+   - Ensure files are in root directory
+
+2. **Token Errors**
+   ```
+   Discord token not found
+   ```
+   - Check environment variable on Railway
+   - Verify token is valid
+   - Check for extra spaces
+
+3. **Startup Issues**
+   ```
+   Error: No module named 'discord'
+   ```
+   - Verify requirements.txt is complete
+   - Check Python version in runtime.txt
+   - Review build logs
+
+### Required Files Content
+
+1. **requirements.txt**
+   ```
+   discord.py>=2.0.0
+   pandas>=1.3.0
+   python-dotenv>=0.19.0
+   openpyxl>=3.0.0
+   psutil>=5.8.0
+   aiohttp>=3.8.0
+   ```
+
+2. **Procfile**
+   ```
+   worker: python Discord_Message_exporter
+   ```
+
+3. **runtime.txt**
+   ```
+   python-3.9.16
+   ```
+
+4. **railway.toml**
+   ```toml
+   [build]
+   builder = "NIXPACKS"
+   buildCommand = "pip install -r requirements.txt"
+
+   [deploy]
+   startCommand = "python Discord_Message_exporter"
+   restartPolicyType = "ON_FAILURE"
+   restartPolicyMaxRetries = 10
+   ```

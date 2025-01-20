@@ -28,35 +28,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load and validate environment variables
-check_env_file()
-load_dotenv(override=True)
+# Replace the env file check with a simpler version
+def check_env_file():
+    """Check if token is available"""
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        print("Error: Discord token not found!")
+        print("Make sure DISCORD_TOKEN is set in your environment variables")
+        sys.exit(1)
+    return token
+
+# Move this before any function calls
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# Check if the token is loaded but don't print it
-if not TOKEN:
-    print("Error: Discord token not found in .env file!")
-    print("Please add DISCORD_TOKEN=your_token_here to your .env file")
-    sys.exit(1)
-else:
+# Initialize environment
+if __name__ == "__main__":
+    # Load environment variables
+    load_dotenv(override=True)
+    
+    # Check token
+    if not TOKEN:
+        TOKEN = check_env_file()
+    
     print("Token loaded successfully (token hidden for security)")
 
-# Add .env to .gitignore if it doesn't exist
-gitignore_path = '.gitignore'
-if not os.path.exists(gitignore_path):
-    with open(gitignore_path, 'w') as f:
-        f.write(".env\n")
-elif '.env' not in open(gitignore_path).read():
-    with open(gitignore_path, 'a') as f:
-        f.write("\n.env\n")
-
-# Define the bot with necessary intents
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-client = discord.Client(intents=intents)
+    # Define the bot with necessary intents
+    intents = discord.Intents.default()
+    intents.messages = True
+    intents.message_content = True
+    intents.guilds = True
+    intents.members = True
+    client = discord.Client(intents=intents)
 
 # Add error handling decorator
 def handle_errors(func):
