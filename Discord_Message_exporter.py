@@ -26,10 +26,38 @@ import json
 import glob
 from functools import wraps
 
+# Import config after other imports
+try:
+    from config import *
+except ImportError:
+    # Fallback configuration if config.py is not found
+    VERSION = "1.0.0"
+    COMMAND_PREFIX = "/"
+    DEFAULT_CHUNK_SIZE = 10000
+    EXPORT_COOLDOWN = 5
+    MAINTENANCE_MODE = False
+    MEMORY_WARNING_THRESHOLD = 70
+    MEMORY_CRITICAL_THRESHOLD = 85
+    MEMORY_CHECK_INTERVAL = 60
+    MEMORY_TREND_SAMPLES = 5
+    DATA_DIR = "data"
+    LOG_FILE = "discord_exporter.log"
+    STATE_FILE = "bot_state.json"
+    LOG_MAX_SIZE = 5 * 1024 * 1024
+    LOG_BACKUP_COUNT = 5
+    LOG_RETENTION_DAYS = 30
+    MAX_MESSAGES_EXCEL = 100000
+    MAX_MESSAGES_CSV = 500000
+    RATE_LIMIT_DELAY = 0.25
+    MAX_RETRIES = 5
+    TIMEOUT = 30.0
+    DIR_PERMISSION = 0o700
+    FILE_PERMISSION = 0o600
+
 # 2. DATA DIRECTORY SETUP
 class DataDirectory:
     """Manage bot data directory structure"""
-    def __init__(self, base_dir: str = "data"):
+    def __init__(self, base_dir: str = DATA_DIR):
         self.base_dir = base_dir
         self.state_dir = os.path.join(base_dir, "state")
         self.logs_dir = os.path.join(base_dir, "logs")
@@ -40,9 +68,9 @@ class DataDirectory:
         """Create directory structure with proper permissions"""
         for directory in [self.base_dir, self.state_dir, self.logs_dir, self.temp_dir]:
             if not os.path.exists(directory):
-                os.makedirs(directory, mode=0o700)  # Secure permissions
+                os.makedirs(directory, mode=DIR_PERMISSION)
             else:
-                os.chmod(directory, 0o700)  # Ensure proper permissions
+                os.chmod(directory, DIR_PERMISSION)
 
     def get_state_file(self, filename: str) -> str:
         """Get path for state file"""
@@ -127,7 +155,7 @@ data_dir = DataDirectory()
 cleanup_old_logs()
 
 # 3. VERSION
-VERSION = "1.0.0"
+VERSION = VERSION  # Using imported VERSION instead of config.VERSION
 
 # 4. ENVIRONMENT SETUP
 def check_env_file():
@@ -151,9 +179,9 @@ log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
 # File handler with rotation
 file_handler = RotatingFileHandler(
-    data_dir.get_log_file('discord_exporter.log'),  # Use data directory
-    maxBytes=5*1024*1024,  # 5MB
-    backupCount=5,
+    data_dir.get_log_file(LOG_FILE),  # Using imported LOG_FILE
+    maxBytes=LOG_MAX_SIZE,  # Using imported LOG_MAX_SIZE
+    backupCount=LOG_BACKUP_COUNT,  # Using imported LOG_BACKUP_COUNT
     encoding='utf-8'
 )
 file_handler.setFormatter(log_formatter)
@@ -241,7 +269,7 @@ class ExporterBot(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._last_export_time = 0
-        self._export_cooldown = 5
+        self._export_cooldown = EXPORT_COOLDOWN  # Using imported EXPORT_COOLDOWN
         self._session = None
         self._active_exports = set()
         self._start_time = time.time()
@@ -593,7 +621,7 @@ async def estimate_message_count(channel: discord.TextChannel, role=None, after=
         return 1000  # Default fallback estimate
 
 # Add this helper function to handle pagination
-async def fetch_messages_with_pagination(channel, progress_tracker=None, max_retries=5, timeout=30.0):
+async def fetch_messages_with_pagination(channel, progress_tracker=None, max_retries=MAX_RETRIES, timeout=TIMEOUT):
     messages = []
     last_message_id = None
     batch_count = 0
@@ -621,7 +649,7 @@ async def fetch_messages_with_pagination(channel, progress_tracker=None, max_ret
                 await progress_tracker.update(force=True, batch_mode=True)
             
             last_message_id = batch[-1].id
-            await asyncio.sleep(min(2.0, 0.25 * batch_count))
+            await asyncio.sleep(min(2.0, RATE_LIMIT_DELAY * batch_count))
             
         except (asyncio.TimeoutError, discord.errors.HTTPException, aiohttp.ClientError) as e:
             retry_count += 1
@@ -1398,7 +1426,10 @@ if __name__ == "__main__":
 # Add to utility functions
 class MemoryMonitor:
     """Monitor memory usage and trigger cleanup when needed"""
-    def __init__(self, warning_threshold=70, critical_threshold=85, trend_samples=5):
+    def __init__(self, 
+                 warning_threshold=MEMORY_WARNING_THRESHOLD,  # Using imported constants
+                 critical_threshold=MEMORY_CRITICAL_THRESHOLD,
+                 trend_samples=MEMORY_TREND_SAMPLES):
         self.warning_threshold = warning_threshold
         self.critical_threshold = critical_threshold
         self.last_check = time.time()
