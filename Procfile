@@ -1,1 +1,1 @@
-worker: python Discord_Message_exporter 
+worker: python Discord_Message_exporter.py 

@@ -201,3 +201,15 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Don't ignore these files
+!Discord_Message_exporter.py
+!requirements.txt
+!railway.toml
+!Procfile
+
+# Ignore these
+.env
+*.pyc
+__pycache__/
+*.log
