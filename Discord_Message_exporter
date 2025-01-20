@@ -3,17 +3,30 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
+import asyncio
+import zipfile
+import io
+import concurrent.futures
+import functools
+import traceback
+import psutil
+import time
+from typing import Optional, Tuple, List
+import aiohttp
+import logging
 
-def check_env_file():
-    """Check if .env file exists and has required variables"""
-    if not os.path.exists('.env'):
-        print("Error: .env file not found!")
-        print("Please create a .env file with your DISCORD_TOKEN")
-        print("Example .env file:")
-        print("DISCORD_TOKEN=your_token_here")
-        sys.exit(1)
+# Add logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('discord_exporter.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load and validate environment variables
 check_env_file()
@@ -45,11 +58,53 @@ intents.guilds = True
 intents.members = True
 client = discord.Client(intents=intents)
 
+# Add error handling decorator
+def handle_errors(func):
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except discord.errors.Forbidden as e:
+            print(f"Permission error: {e}")
+            if hasattr(args[0], 'channel'):
+                await args[0].channel.send("❌ I don't have the required permissions!")
+        except discord.errors.HTTPException as e:
+            print(f"Discord API error: {e}")
+            if hasattr(args[0], 'channel'):
+                await args[0].channel.send("❌ Discord API error. Please try again later.")
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            if hasattr(args[0], 'channel'):
+                await args[0].channel.send(f"❌ An error occurred: {str(e)}")
+    return wrapper
+
+# Add timeout handler
+async def wait_for_response(client, message, check, timeout=30):
+    try:
+        return await client.wait_for("message", check=check, timeout=timeout)
+    except asyncio.TimeoutError:
+        await message.channel.send("⏰ Timeout: You took too long to respond.")
+        return None
+
+# Add validation function
+def validate_date_range(start_date_str, end_date_str):
+    try:
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+        end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+        if start_date > end_date:
+            return None, None, "Start date must be before end date"
+        if end_date > datetime.now():
+            return None, None, "End date cannot be in the future"
+        return start_date, end_date, None
+    except ValueError:
+        return None, None, "Invalid date format. Use YYYY-MM-DD"
+
 @client.event
+@handle_errors
 async def on_ready():
     print(f'Bot connected as {client.user}')
 
 @client.event
+@handle_errors
 async def on_message(message):
     print(f"Message received: {repr(message.content)}")
 
@@ -64,6 +119,19 @@ async def on_message(message):
     if message.content.strip().lower() in ['!extract', '!extractcsv']:
         print("Extract command recognized!")
         try:
+            # Add memory check
+            available_memory = psutil.virtual_memory().available / (1024 * 1024)  # MB
+            if available_memory < 100:  # Less than 100MB available
+                await message.channel.send("⚠️ Warning: Low memory available. Consider using smaller chunks.")
+
+            # Add rate limit check
+            if hasattr(client, '_last_export_time'):
+                time_since_last = time.time() - client._last_export_time
+                if time_since_last < 5:  # 5 seconds cooldown
+                    await message.channel.send("⏳ Please wait a few seconds between exports.")
+                    return
+            client._last_export_time = time.time()
+
             await message.channel.send("Processing your request...")
 
             # Check if message is from a guild (server)
@@ -196,126 +264,225 @@ async def on_message(message):
             except TimeoutError:
                 date_range = None
 
-            await message.channel.send("Collecting messages... This might take a while.")
-            messages = []
-            message_count = 0
-            progress_message = await message.channel.send("Progress: 0 messages processed...")
+            # Ask for chunk size preference
+            await message.channel.send("Enter maximum messages per file (default: 10000, enter 0 for no limit):")
             try:
-                async for msg in selected_channel.history(limit=None):
-                    message_count += 1
-                    if message_count % 100 == 0:  # Update every 100 messages
-                        await progress_message.edit(content=f"Progress: {message_count} messages processed...")
-                    
-                    # Check if message author has any of the selected roles
-                    member = guild.get_member(msg.author.id)
-                    if member and any(role in member.roles for role in roles):
-                        # Apply category filter
-                        if selected_category and selected_channel not in selected_category.channels:
-                            continue
+                reply = await client.wait_for("message", check=lambda m: m.author == message.author and m.channel == message.channel, timeout=30)
+                chunk_size = int(reply.content) if reply.content.strip().isdigit() else 10000
+            except (TimeoutError, ValueError):
+                chunk_size = 10000
 
-                        # Apply content search filter
-                        if search_terms and search_terms not in msg.content.lower():
-                            continue
-
-                        # Apply date filter
-                        if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
-                            continue
-                            
-                        message_data = {
-                            'Author': str(msg.author),
-                            'Content': msg.content,
-                            'Timestamp': msg.created_at.isoformat()
-                        }
+            # If date range is specified, split into smaller ranges if needed
+            if date_range:
+                try:
+                    current_date = start_date
+                    while current_date <= end_date:
+                        next_date = min(current_date + timedelta(days=30), end_date)
                         
-                        # Add optional data based on user selection
-                        if 1 in options:  # Attachments URLs
-                            message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
-                            
-                        if 2 in options:  # Message Reactions
-                            reactions = []
-                            for reaction in msg.reactions:
-                                reactions.append(f"{reaction.emoji}: {reaction.count}")
-                            message_data['Reactions'] = ', '.join(reactions)
-                            
-                        if 3 in options:  # Reply References
-                            if msg.reference and isinstance(msg.reference.resolved, discord.Message):
-                                message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
-                            else:
-                                message_data['Replying_To'] = ''
+                        await message.channel.send(f"Collecting messages from {current_date.date()} to {next_date.date()}...")
+                        messages = []
+                        message_count = 0
+                        progress_message = await message.channel.send("Progress: 0 messages processed...")
+                        
+                        try:
+                            async for msg in selected_channel.history(
+                                limit=None,
+                                after=current_date,
+                                before=next_date + timedelta(days=1)
+                            ):
+                                message_count += 1
+                                if message_count % 100 == 0:  # Update every 100 messages
+                                    await progress_message.edit(content=f"Progress: {message_count} messages processed...")
                                 
-                        if 4 in options:  # Message Edits
-                            message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+                                # Check if message author has any of the selected roles
+                                member = guild.get_member(msg.author.id)
+                                if member and any(role in member.roles for role in roles):
+                                    # Apply category filter
+                                    if selected_category and selected_channel not in selected_category.channels:
+                                        continue
 
-                        if 5 in options:  # Message Embeds
-                            embeds_data = []
-                            for embed in msg.embeds:
-                                embed_info = {
-                                    'title': embed.title,
-                                    'description': embed.description,
-                                    'url': embed.url
-                                }
-                                embeds_data.append(str(embed_info))
-                            message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+                                    # Apply content search filter
+                                    if search_terms and search_terms not in msg.content.lower():
+                                        continue
 
-                        if 6 in options:  # Pinned Status
-                            message_data['Pinned'] = str(msg.pinned)
+                                    # Apply date filter
+                                    if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
+                                        continue
+                                    
+                                    message_data = {
+                                        'Author': str(msg.author),
+                                        'Content': msg.content,
+                                        'Timestamp': msg.created_at.isoformat()
+                                    }
+                                    
+                                    # Add optional data based on user selection
+                                    if 1 in options:  # Attachments URLs
+                                        message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
+                                        
+                                    if 2 in options:  # Message Reactions
+                                        reactions = []
+                                        for reaction in msg.reactions:
+                                            reactions.append(f"{reaction.emoji}: {reaction.count}")
+                                        message_data['Reactions'] = ', '.join(reactions)
+                                        
+                                    if 3 in options:  # Reply References
+                                        if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+                                            message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
+                                        else:
+                                            message_data['Replying_To'] = ''
+                                            
+                                    if 4 in options:  # Message Edits
+                                        message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+
+                                    if 5 in options:  # Message Embeds
+                                        embeds_data = []
+                                        for embed in msg.embeds:
+                                            embed_info = {
+                                                'title': embed.title,
+                                                'description': embed.description,
+                                                'url': embed.url
+                                            }
+                                            embeds_data.append(str(embed_info))
+                                        message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+
+                                    if 6 in options:  # Pinned Status
+                                        message_data['Pinned'] = str(msg.pinned)
+                                        
+                                    messages.append(message_data)
+
+                                # Auto-save when chunk_size is reached
+                                if chunk_size > 0 and len(messages) >= chunk_size:
+                                    await save_and_send_messages(
+                                        messages, 
+                                        selected_channel.name,
+                                        current_date.strftime('%Y%m%d'),
+                                        message.content.strip().lower() == '!extractcsv',
+                                        chunk_size,
+                                        message
+                                    )
+                                    messages = []  # Clear for next chunk
+                                
+                        except discord.Forbidden:
+                            await message.channel.send("I don't have permission to read message history!")
+                            return
                             
-                        messages.append(message_data)
-            except discord.Forbidden:
-                await message.channel.send("I don't have permission to read message history!")
-                return
-
-            if not messages:
-                await message.channel.send(f'No messages found for role "{role_name}".')
-                return
-
-            try:
-                # Determine file format based on command
-                is_csv = message.content.strip().lower() == '!extractcsv'
-                file_extension = 'csv' if is_csv else 'xlsx'
-                filename = f'{selected_channel.name}_messages.{file_extension}'
-                print(f"Attempting to save file: {filename}")
+                        current_date = next_date + timedelta(days=1)
+                        if current_date <= end_date:
+                            await message.channel.send("Waiting 5 seconds before next batch...")
+                            await asyncio.sleep(5)  # Avoid rate limits
                 
-                if len(messages) > 10000:  # If more than 10k messages
-                    # Split into multiple files
-                    chunk_size = 10000
-                    chunks = [messages[i:i + chunk_size] for i in range(0, len(messages), chunk_size)]
+                except Exception as e:
+                    await message.channel.send(f"Error during date-based export: {str(e)}")
+                    return
                     
-                    for i, chunk in enumerate(chunks):
-                        filename = f'{selected_channel.name}_messages_part{i+1}.{file_extension}'
-                        df = pd.DataFrame(chunk)
+            else:
+                # Regular export without date splitting
+                messages = []
+                message_count = 0
+                progress_message = await message.channel.send("Progress: 0 messages processed...")
+                
+                try:
+                    async for msg in selected_channel.history(limit=None):
+                        message_count += 1
+                        if message_count % 100 == 0:  # Update every 100 messages
+                            await progress_message.edit(content=f"Progress: {message_count} messages processed...")
                         
-                        if is_csv:
-                            df.to_csv(filename, index=False, encoding='utf-8')
-                        else:
-                            df.to_excel(filename, index=False)
-                        
-                        await message.channel.send(
-                            f'Extracted {len(chunk)} messages from "{selected_channel.name}".',
-                            file=discord.File(filename)
-                        )
-                        os.remove(filename)
-                else:
-                    df = pd.DataFrame(messages)
-                    
-                    if is_csv:
-                        df.to_csv(filename, index=False, encoding='utf-8')
-                    else:
-                        df.to_excel(filename, index=False)
-                    
-                    await message.channel.send(
-                        f'Extracted {len(messages)} messages from "{selected_channel.name}".',
-                        file=discord.File(filename)
+                        # Check if message author has any of the selected roles
+                        member = guild.get_member(msg.author.id)
+                        if member and any(role in member.roles for role in roles):
+                            # Apply category filter
+                            if selected_category and selected_channel not in selected_category.channels:
+                                continue
+
+                            # Apply content search filter
+                            if search_terms and search_terms not in msg.content.lower():
+                                continue
+
+                            # Apply date filter
+                            if date_range and not (start_date <= msg.created_at.replace(tzinfo=None) <= end_date):
+                                continue
+                            
+                            message_data = {
+                                'Author': str(msg.author),
+                                'Content': msg.content,
+                                'Timestamp': msg.created_at.isoformat()
+                            }
+                            
+                            # Add optional data based on user selection
+                            if 1 in options:  # Attachments URLs
+                                message_data['Attachments'] = ', '.join([a.url for a in msg.attachments])
+                                
+                            if 2 in options:  # Message Reactions
+                                reactions = []
+                                for reaction in msg.reactions:
+                                    reactions.append(f"{reaction.emoji}: {reaction.count}")
+                                message_data['Reactions'] = ', '.join(reactions)
+                                
+                            if 3 in options:  # Reply References
+                                if msg.reference and isinstance(msg.reference.resolved, discord.Message):
+                                    message_data['Replying_To'] = f"{msg.reference.resolved.author}: {msg.reference.resolved.content[:100]}..."
+                                else:
+                                    message_data['Replying_To'] = ''
+                                    
+                            if 4 in options:  # Message Edits
+                                message_data['Edited_At'] = msg.edited_at.isoformat() if msg.edited_at else ''
+
+                            if 5 in options:  # Message Embeds
+                                embeds_data = []
+                                for embed in msg.embeds:
+                                    embed_info = {
+                                        'title': embed.title,
+                                        'description': embed.description,
+                                        'url': embed.url
+                                    }
+                                    embeds_data.append(str(embed_info))
+                                message_data['Embeds'] = ' | '.join(embeds_data) if embeds_data else ''
+
+                            if 6 in options:  # Pinned Status
+                                message_data['Pinned'] = str(msg.pinned)
+                                
+                            messages.append(message_data)
+
+                            # Auto-save when chunk_size is reached
+                            if chunk_size > 0 and len(messages) >= chunk_size:
+                                await save_and_send_messages(
+                                    messages,
+                                    selected_channel.name,
+                                    "final",
+                                    message.content.strip().lower() == '!extractcsv',
+                                    chunk_size,
+                                    message
+                                )
+                                messages = []  # Clear for next chunk
+                            
+                except discord.Forbidden:
+                    await message.channel.send("I don't have permission to read message history!")
+                    return
+
+                # Save any remaining messages
+                if messages:
+                    await save_and_send_messages(
+                        messages,
+                        selected_channel.name,
+                        "final",
+                        message.content.strip().lower() == '!extractcsv',
+                        chunk_size,
+                        message
                     )
-                    os.remove(filename)
-            except Exception as e:
-                await message.channel.send(f"Error creating file: {str(e)}")
-                if os.path.exists(filename):
-                    os.remove(filename)
+
+            # Add better error messages for common issues
+            if not messages:
+                await message.channel.send("ℹ️ No messages found matching your criteria.")
+                return
+
+            if len(messages) > 50000 and not is_csv:
+                await message.channel.send("⚠️ Large export detected. Switching to CSV format for better performance.")
+                is_csv = True
 
         except Exception as e:
-            print(f"An error occurred: {str(e)}")
-            await message.channel.send(f"An error occurred: {str(e)}")
+            await message.channel.send(f"❌ Export failed: {str(e)}")
+            print(f"Export error: {e}")
+            traceback.print_exc()
 
     if message.content.strip().lower() == '!help':
         help_text = """
@@ -349,6 +516,177 @@ async def on_message(message):
         """
         await message.channel.send(help_text)
         return
+
+# Add retry decorator for API calls
+def retry_on_error(retries=3, delay=1):
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            for attempt in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (discord.errors.HTTPException, aiohttp.ClientError) as e:
+                    if attempt == retries - 1:
+                        raise
+                    logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                    await asyncio.sleep(delay * (attempt + 1))
+            return None
+        return wrapper
+    return decorator
+
+# Modify save_and_send_messages function
+@retry_on_error()
+async def save_and_send_messages(messages, channel_name, suffix, is_csv, chunk_size, original_message):
+    """Helper function with improved error handling and retries"""
+    try:
+        if not messages:
+            return
+
+        # Add file size check before processing
+        estimated_size = len(str(messages)) / 1024  # Rough size estimate in KB
+        if estimated_size > 7000:  # Close to Discord's 8MB limit
+            await original_message.channel.send("⚠️ Large file detected, using compression...")
+            
+        # Clean message data
+        cleaned_messages = []
+        for msg in messages:
+            try:
+                # Remove invalid characters and normalize data
+                msg['Content'] = msg['Content'].replace('\x00', '').strip()
+                msg['Author'] = msg['Author'].replace('\x00', '').strip()
+                cleaned_messages.append(msg)
+            except Exception as e:
+                logger.error(f"Message cleaning error: {e}")
+                continue
+
+        file_extension = 'csv' if is_csv else 'xlsx'
+        base_filename = f'{channel_name}_messages_{suffix}.{file_extension}'
+        zip_filename = f'{channel_name}_messages_{suffix}.zip'
+        
+        # Create ZIP file in memory with error handling
+        zip_buffer = io.BytesIO()
+        try:
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                df = pd.DataFrame(cleaned_messages)
+                if is_csv:
+                    csv_buffer = io.StringIO()
+                    df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
+                    zip_file.writestr(base_filename, csv_buffer.getvalue())
+                else:
+                    excel_buffer = io.BytesIO()
+                    df.to_excel(excel_buffer, index=False, engine='openpyxl')
+                    zip_file.writestr(base_filename, excel_buffer.getvalue())
+        except Exception as e:
+            logger.error(f"Compression error: {e}")
+            raise
+
+        # Check file size before sending
+        zip_buffer.seek(0, os.SEEK_END)
+        size = zip_buffer.tell()
+        zip_buffer.seek(0)
+        
+        if size > 8 * 1024 * 1024:  # 8MB
+            raise ValueError("File too large for Discord upload")
+
+        await original_message.channel.send(
+            f'Extracted {len(cleaned_messages)} messages from "{channel_name}" (compressed).',
+            file=discord.File(zip_buffer, filename=zip_filename)
+        )
+        
+    except discord.errors.HTTPException as e:
+        error_msg = "File too large. Try reducing the chunk size or using CSV format." if e.code == 40005 else f"Discord error: {str(e)}"
+        await original_message.channel.send(f"❌ {error_msg}")
+        logger.error(f"HTTP error: {e}")
+    except Exception as e:
+        await original_message.channel.send(f"❌ Error saving/sending file: {str(e)}")
+        logger.error(f"Save/send error: {e}", exc_info=True)
+
+def process_message_batch(messages):
+    """Process a batch of messages in parallel"""
+    df = pd.DataFrame(messages)
+    return df
+
+async def save_large_export(messages, chunk_size=1000):
+    """Process large exports in parallel"""
+    chunks = [messages[i:i + chunk_size] for i in range(0, len(messages), chunk_size)]
+    
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ProcessPoolExecutor() as pool:
+        # Process chunks in parallel
+        tasks = [
+            loop.run_in_executor(
+                pool, 
+                functools.partial(process_message_batch, chunk)
+            )
+            for chunk in chunks
+        ]
+        results = await asyncio.gather(*tasks)
+    
+    # Combine results
+    return pd.concat(results)
+
+async def get_message_density(channel, start_date, end_date):
+    """Estimate message density to optimize chunk size"""
+    sample_messages = []
+    async for msg in channel.history(
+        limit=100,
+        after=start_date,
+        before=end_date
+    ):
+        sample_messages.append(msg.created_at)
+    
+    if not sample_messages:
+        return 30  # Default chunk size in days
+    
+    # Calculate average messages per day
+    msg_count = len(sample_messages)
+    days_span = (max(sample_messages) - min(sample_messages)).days or 1
+    density = msg_count / days_span
+    
+    # Adjust chunk size based on density
+    if density > 1000:  # Very active channel
+        return 7  # Weekly chunks
+    elif density > 100:
+        return 14  # Bi-weekly chunks
+    else:
+        return 30  # Monthly chunks
+
+async def process_messages_generator(channel, roles, options, start_date=None, end_date=None):
+    """Generator function for memory-efficient message processing"""
+    async for msg in channel.history(limit=None, after=start_date, before=end_date):
+        # Process one message at a time
+        message_data = await process_single_message(msg, roles, options)
+        if message_data:
+            yield message_data
+
+async def process_single_message(msg, roles, options):
+    """Process a single message with minimal memory usage"""
+    member = msg.guild.get_member(msg.author.id)
+    if not member or not any(role in member.roles for role in roles):
+        return None
+        
+    # Basic message data
+    message_data = {
+        'Author': str(msg.author),
+        'Content': msg.content,
+        'Timestamp': msg.created_at.isoformat()
+    }
+    
+    # Add selected options
+    if options:
+        # Add only requested data
+        pass
+        
+    return message_data
+
+# Add memory management
+def clear_memory():
+    """Force garbage collection"""
+    import gc
+    gc.collect()
+    
+# Add this to the message processing loop
+if message_count % 1000 == 0:
+    clear_memory()
 
 # Run the bot
 client.run(TOKEN)
