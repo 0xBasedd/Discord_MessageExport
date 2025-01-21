@@ -1,1 +1,1 @@
-worker: ln -s Discord_Message_exporter.py Discord_Message_exporter && python3 -u Discord_Message_exporter.py 
+worker: bash start.sh 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Discord Message Exporter Bot
 Copyright (c) 2024 info-infoweb
@@ -9,41 +10,43 @@ formatting, and data management capabilities.
 Licensed under MIT License
 """
 
-# Add at the very start of the file, before anything else
+# 1. BASIC IMPORTS
 import os
 import sys
+from dotenv import load_dotenv
 
-# Railway-specific startup check
-if os.getenv('RAILWAY_ENVIRONMENT'):
+# 3. RAILWAY CHECK
+RAILWAY_MODE = bool(os.getenv('RAILWAY_ENVIRONMENT'))
+if RAILWAY_MODE:
     try:
         print("\n=== Railway Startup Check ===")
-        script_name = 'Discord_Message_exporter.py'
-        script_link = 'Discord_Message_exporter'
-        
         print(f"Python executable: {sys.executable}")
+        print(f"Script path: {__file__}")
         print(f"Working directory: {os.getcwd()}")
         print(f"Available files: {os.listdir()}")
         
-        # Check both script file and symlink
-        if not os.path.exists(script_name):
-            print(f"ERROR: Main script {script_name} not found!")
+        # Verify we're running from the correct location
+        if not os.path.exists('/app/bot.py'):
+            print("ERROR: Bot file not found in /app directory!")
+            print("Files in /app:", os.listdir('/app'))
             sys.exit(1)
             
-        # Create symlink if needed
-        if not os.path.exists(script_link):
-            try:
-                os.symlink(script_name, script_link)
-                print(f"Created symlink: {script_link} -> {script_name}")
-            except Exception as e:
-                print(f"Warning: Could not create symlink: {e}")
-        
-        print("Startup check complete")
+        # Check write permissions
+        try:
+            test_file = "/app/write_test"
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print("Write permissions OK")
+        except Exception as e:
+            print(f"Warning: Write permission test failed: {e}")
+            
         print("===========================\n")
     except Exception as e:
         print(f"Railway startup check failed: {e}")
         sys.exit(1)
 
-# 1. IMPORTS
+# 4. REST OF IMPORTS
 import discord
 import os
 import pandas as pd
@@ -116,106 +119,7 @@ if RAILWAY_MODE:
             print(f"Fallback write test failed: {e2}")
             print("WARNING: Bot may have limited functionality")
 
-# 2. ENVIRONMENT SETUP
-def check_env_file():
-    """Check if token is available"""
-    token = os.getenv('DISCORD_TOKEN')
-    if not token:
-        if os.getenv('RAILWAY_ENVIRONMENT'):
-            print("\n=== Railway Environment Error ===")
-            print("Discord token not found in Railway variables!")
-            print("Available environment variables:")
-            print("\n".join(sorted([k for k in os.environ.keys() if not k.startswith('PATH')])))
-            print("=============================\n")
-        else:
-            print("Error: Discord token not found!")
-            print("Make sure DISCORD_TOKEN is set in your environment variables")
-        sys.exit(1)
-    return token
-
-# Load environment variables (skip on Railway)
-if not os.getenv('RAILWAY_ENVIRONMENT'):
-    load_dotenv(override=True)
-
-TOKEN = os.getenv('DISCORD_TOKEN')
-if not TOKEN:
-    TOKEN = check_env_file()
-print("Token loaded successfully (token hidden for security)")
-
-# Add Railway environment checks
-RAILWAY_MODE = bool(os.getenv('RAILWAY_ENVIRONMENT'))
-if RAILWAY_MODE:
-    print("\n=== Railway Environment Details ===")
-    print(f"Python version: {sys.version}")
-    print(f"Working directory: {os.getcwd()}")
-    print(f"Available directories: {os.listdir()}")
-    print(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('PATH')]}")
-    print(f"Discord.py version: {discord.__version__}")
-    print(f"Memory: {psutil.virtual_memory()}")
-    print("================================\n")
-
-    # Additional Railway-specific checks
-    try:
-        import pwd
-        print("\n=== Railway User Details ===")
-        print(f"Current user: {pwd.getpwuid(os.getuid()).pw_name}")
-        print(f"User home: {os.path.expanduser('~')}")
-        print(f"User permissions: {oct(os.stat('.').st_mode)[-3:]}")
-        print("===========================\n")
-    except ImportError:
-        print("pwd module not available")
-
-    # Check write permissions
-    try:
-        print("\n=== Railway Write Test ===")
-        test_file = "/tmp/write_test"
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
-        print("Write test successful")
-        print("========================\n")
-    except Exception as e:
-        print(f"Write test failed: {e}")
-        print("Attempting fallback to user directory...")
-        try:
-            test_file = os.path.expanduser("~/write_test")
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-            print("Fallback write test successful")
-        except Exception as e2:
-            print(f"Fallback write test failed: {e2}")
-            print("WARNING: Bot may have limited functionality")
-
-# Import config after environment setup
-try:
-    from config import *
-except ImportError:
-    # Fallback configuration if config.py is not found
-    VERSION = "1.0.0"
-    COMMAND_PREFIX = "/"
-    DEFAULT_CHUNK_SIZE = 10000
-    EXPORT_COOLDOWN = 5
-    MAINTENANCE_MODE = False
-    MEMORY_WARNING_THRESHOLD = 70
-    MEMORY_CRITICAL_THRESHOLD = 85
-    MEMORY_CHECK_INTERVAL = 60
-    MEMORY_TREND_SAMPLES = 5
-    DATA_DIR = "data"
-    LOG_FILE = "discord_exporter.log"
-    STATE_FILE = "bot_state.json"
-    LOG_MAX_SIZE = 5 * 1024 * 1024
-    LOG_BACKUP_COUNT = 5
-    LOG_RETENTION_DAYS = 30
-    MAX_MESSAGES_EXCEL = 100000
-    MAX_MESSAGES_CSV = 500000
-    RATE_LIMIT_DELAY = 0.25
-    MAX_RETRIES = 5
-    TIMEOUT = 30.0
-    DIR_PERMISSION = 0o700
-    FILE_PERMISSION = 0o600
-
-# 3. DATA DIRECTORY SETUP
+# 6. DATA DIRECTORY SETUP
 class RailwayFileHandler:
     """Handle file operations for Railway environment"""
     @staticmethod
@@ -366,10 +270,10 @@ data_dir = DataDirectory()
 # Clean up old logs at startup
 cleanup_old_logs()
 
-# 3. VERSION
+# 7. VERSION
 VERSION = VERSION  # Using imported VERSION instead of config.VERSION
 
-# 4. LOGGING CONFIGURATION
+# 8. LOGGING CONFIGURATION
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
 # File handler with rotation
@@ -396,7 +300,7 @@ for handler in logger.handlers[:]:
     if not isinstance(handler, (RotatingFileHandler, logging.StreamHandler)):
         logger.removeHandler(handler)
 
-# 5. CLASS DEFINITIONS
+# 9. CLASS DEFINITIONS
 class ProgressTracker:
     def __init__(self, message, total=None):
         self.message = message
@@ -571,7 +475,7 @@ class ExportCleanup:
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
-# 6. UTILITY FUNCTIONS
+# 10. UTILITY FUNCTIONS
 def clear_memory():
     """Force garbage collection"""
     import gc
@@ -598,7 +502,7 @@ async def check_memory_usage(message_count, message):
         if client and not await client.check_memory():
             await message.channel.send("⚠️ Warning: Memory usage high, consider using smaller chunks")
 
-# 7. DECORATORS
+# 11. DECORATORS
 def handle_errors(func):
     """Error handling decorator for event handlers"""
     @wraps(func)
@@ -659,7 +563,7 @@ def command_cooldown(seconds: int):
         return wrapper
     return decorator
 
-# 8. HELPER FUNCTIONS
+# 12. HELPER FUNCTIONS
 async def process_message_filters(msg, role, category, channel, search, date_from, date_to):
     """Process all message filters"""
     try:
@@ -867,11 +771,11 @@ async def fetch_messages_with_pagination(channel, progress_tracker=None, max_ret
     
     return messages
 
-# 9. BOT INITIALIZATION
+# 13. BOT INITIALIZATION
 client = ExporterBot()  # Initialize immediately instead of setting to None
 BotInstance.set_instance(client)
 
-# 10. EVENT HANDLERS
+# 14. EVENT HANDLERS
 @client.event
 @handle_errors
 async def on_ready():
@@ -896,7 +800,7 @@ async def on_command_error(interaction: discord.Interaction, error: app_commands
             ephemeral=True
         )
 
-# 11. SLASH COMMANDS
+# 15. SLASH COMMANDS
 @client.tree.command(name="export", description="Export messages to Excel/CSV format")
 @app_commands.describe(
     format="Choose export format (Excel or CSV)",
@@ -1590,7 +1494,7 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(lambda: asyncio.run(shutdown_handler()))
 
-# 12. RUN BOT
+# 16. RUN BOT
 if __name__ == "__main__":
     try:
         # Clean up old logs
