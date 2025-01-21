@@ -77,53 +77,42 @@ A powerful Discord bot for exporting channel messages with advanced filtering, f
    python Discord_Message_exporter.py
    ```
 
-### Railway.app Deployment
+### Railway Deployment
+1. Create a new Railway project
+2. Add your Discord bot token as an environment variable:
+   - Variable name: `DISCORD_TOKEN`
+   - Value: Your bot token
 
-1. **Fork the Repository**
-   - Fork this repository to your GitHub account
+3. Connect your GitHub repository to Railway
 
-2. **Set Up Railway Project**
-   - Go to [Railway.app](https://railway.app/)
-   - Create new project from GitHub
-   - Select your forked repository
+4. Required files (already in repo):
+   - `Procfile` - Contains the start command
+   - `requirements.txt` - Lists all dependencies
+   - `Discord_Message_exporter.py` - Main bot file
 
-3. **Configure Environment Variables**
-   - Add `DISCORD_TOKEN` in Railway's variables section
-   - Value: Your Discord bot token
+No additional configuration needed - Railway will automatically:
+- Detect Python
+- Install dependencies from requirements.txt
+- Use the Procfile to start the bot
 
-4. **Deploy**
-   - Railway will automatically deploy your bot
-   - Check deployment logs for any issues
+## Environment Variables
+- `DISCORD_TOKEN` - Your bot token (required)
+- `RAILWAY_ENVIRONMENT` - Set automatically by Railway
 
-### Required Files for Railway
+## File Structure
+```
+├── Discord_Message_exporter.py
+├── Procfile
+├── README.md
+├── requirements.txt
+└── data/
+    ├── logs/
+    ├── state/
+    └── temp/
+```
 
-1. **Procfile**
-   ```
-   worker: python Discord_Message_exporter.py
-   ```
-
-2. **runtime.txt**
-   ```
-   python-3.9.16
-   ```
-
-3. **railway.toml**
-   ```toml
-   [build]
-   builder = "NIXPACKS"
-   buildCommand = "pip install -r requirements.txt"
-
-   [deploy]
-   startCommand = "python Discord_Message_exporter.py"
-   restartPolicyType = "ON_FAILURE"
-   restartPolicyMaxRetries = 10
-   ```
-
-### Railway.app Limitations
-- Free tier: 500 hours/month
-- Memory: 512MB RAM
-- Shared CPU
-- No persistent storage
+## Local Development
+[rest of the README...]
 
 ## 💻 Commands
 
