@@ -16,12 +16,17 @@ import sys
 from dotenv import load_dotenv
 import time  # Add this import
 
-# Railway-specific startup check
+# Early Railway check
 if os.getenv('RAILWAY_ENVIRONMENT'):
     print("\n=== Railway Startup Check ===")
-    print(f"Working directory: {os.getcwd()}")
-    print(f"Files available: {os.listdir()}")
-    print(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('PATH')]}")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Available files: {os.listdir()}")
+    
+    # Check if file exists with .py extension
+    if not os.path.exists('Discord_Message_exporter.py'):
+        print("ERROR: Discord_Message_exporter.py not found!")
+        print("Files in directory:", os.listdir())
+        sys.exit(1)
     
     # Verify Discord token is set
     if not os.getenv('DISCORD_TOKEN'):
