@@ -1,1 +1,1 @@
-worker: bash start.sh 
+worker: python3 -u Discord_Message_exporter.py 
