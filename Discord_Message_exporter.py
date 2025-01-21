@@ -143,14 +143,14 @@ if RAILWAY_MODE:
         print(f"Available files: {os.listdir()}")
         
         # Verify we're running from the correct location
-        if not os.path.exists('/app/bot.py'):
-            print("ERROR: Bot file not found in /app directory!")
-            print("Files in /app:", os.listdir('/app'))
+        if not os.path.exists('Discord_Message_exporter.py'):
+            print("ERROR: Discord_Message_exporter.py not found!")
+            print("Files in directory:", os.listdir())
             sys.exit(1)
             
         # Check write permissions
         try:
-            test_file = "/app/write_test"
+            test_file = "write_test"
             with open(test_file, 'w') as f:
                 f.write('test')
             os.remove(test_file)
