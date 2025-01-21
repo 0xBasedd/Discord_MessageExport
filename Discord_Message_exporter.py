@@ -14,6 +14,107 @@ Licensed under MIT License
 import os
 import sys
 from dotenv import load_dotenv
+import time  # Add this import
+
+# 2. CONFIGURATION
+VERSION = "1.0.0"
+COMMAND_PREFIX = "/"
+DEFAULT_CHUNK_SIZE = 10000
+EXPORT_COOLDOWN = 5
+MAINTENANCE_MODE = False
+MEMORY_WARNING_THRESHOLD = 70
+MEMORY_CRITICAL_THRESHOLD = 85
+MEMORY_CHECK_INTERVAL = 60
+MEMORY_TREND_SAMPLES = 5
+DATA_DIR = "data"
+LOG_FILE = "discord_exporter.log"
+STATE_FILE = "bot_state.json"
+LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB
+LOG_BACKUP_COUNT = 5
+LOG_RETENTION_DAYS = 30
+MAX_MESSAGES_EXCEL = 100000
+MAX_MESSAGES_CSV = 500000
+RATE_LIMIT_DELAY = 0.25
+MAX_RETRIES = 5
+TIMEOUT = 30.0
+DIR_PERMISSION = 0o700
+FILE_PERMISSION = 0o600
+
+# 2.1 BOT STATE CLASS
+class BotState:
+    def __init__(self):
+        self.start_time = time.time()
+        self.total_exports = 0
+        self.successful_exports = 0
+        self.failed_exports = 0
+        self.total_messages_processed = 0
+        self.last_error = None
+        self.is_maintenance_mode = MAINTENANCE_MODE
+        self.state_manager = None  # Will be initialized after DataDirectory
+
+    def save_state(self):
+        """Save state to file"""
+        if not self.state_manager:
+            return False
+        state = {
+            'total_exports': self.total_exports,
+            'successful_exports': self.successful_exports,
+            'failed_exports': self.failed_exports,
+            'total_messages_processed': self.total_messages_processed,
+            'is_maintenance_mode': self.is_maintenance_mode
+        }
+        return True
+
+    def load_state(self):
+        """Load state from file"""
+        pass  # Will be implemented after DataDirectory is available
+
+    def record_export(self, success: bool, messages_processed: int = 0):
+        """Record export statistics"""
+        self.total_exports += 1
+        if success:
+            self.successful_exports += 1
+        else:
+            self.failed_exports += 1
+        self.total_messages_processed += messages_processed
+
+    def get_stats(self) -> dict:
+        """Get current statistics"""
+        uptime = time.time() - self.start_time
+        days = int(uptime // (24 * 3600))
+        hours = int((uptime % (24 * 3600)) // 3600)
+        minutes = int((uptime % 3600) // 60)
+        
+        return {
+            'uptime': f"{days}d {hours}h {minutes}m",
+            'total_exports': self.total_exports,
+            'successful_exports': self.successful_exports,
+            'failed_exports': self.failed_exports,
+            'success_rate': f"{(self.successful_exports / self.total_exports * 100):.1f}%" if self.total_exports > 0 else "N/A",
+            'total_messages': self.total_messages_processed,
+            'last_error': str(self.last_error) if self.last_error else None,
+            'maintenance_mode': self.is_maintenance_mode
+        }
+
+    def set_maintenance_mode(self, enabled: bool):
+        """Set maintenance mode"""
+        self.is_maintenance_mode = enabled
+
+# 2.1 ENVIRONMENT SETUP
+# Load environment variables (skip on Railway)
+if not os.getenv('RAILWAY_ENVIRONMENT'):
+    load_dotenv(override=True)
+
+# Get token from environment
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    print("Error: Discord token not found!")
+    print("Make sure DISCORD_TOKEN is set in your environment variables")
+    sys.exit(1)
+print("Token loaded successfully (token hidden for security)")
+
+# Initialize bot state early
+bot_state = BotState()
 
 # 3. RAILWAY CHECK
 RAILWAY_MODE = bool(os.getenv('RAILWAY_ENVIRONMENT'))
@@ -1678,79 +1779,6 @@ class StateFileManager:
         
         return None
 
-class BotState:
-    def __init__(self):
-        self.start_time = time.time()
-        self.total_exports = 0
-        self.successful_exports = 0
-        self.failed_exports = 0
-        self.total_messages_processed = 0
-        self.last_error = None
-        self.is_maintenance_mode = MAINTENANCE_MODE  # Use config value
-        self.state_manager = StateFileManager(data_dir.get_state_file(STATE_FILE))  # Use config value
-        self.load_state()
-
-    def save_state(self):
-        """Save state to file"""
-        state = {
-            'total_exports': self.total_exports,
-            'successful_exports': self.successful_exports,
-            'failed_exports': self.failed_exports,
-            'total_messages_processed': self.total_messages_processed,
-            'is_maintenance_mode': self.is_maintenance_mode
-        }
-        if self.state_manager.save(state):
-            logger.info("Bot state saved")
-        else:
-            logger.error("Failed to save bot state")
-
-    def load_state(self):
-        """Load state from file"""
-        state = self.state_manager.load()
-        if state:
-            self.total_exports = state.get('total_exports', 0)
-            self.successful_exports = state.get('successful_exports', 0)
-            self.failed_exports = state.get('failed_exports', 0)
-            self.total_messages_processed = state.get('total_messages_processed', 0)
-            self.is_maintenance_mode = state.get('is_maintenance_mode', False)
-            logger.info("Bot state loaded")
-
-    def record_export(self, success: bool, messages_processed: int = 0):
-        """Record export statistics and save state"""
-        self.total_exports += 1
-        if success:
-            self.successful_exports += 1
-        else:
-            self.failed_exports += 1
-        self.total_messages_processed += messages_processed
-        self.save_state()  # Save after each update
-
-    def get_stats(self) -> dict:
-        """Get current statistics"""
-        uptime = time.time() - self.start_time
-        days = int(uptime // (24 * 3600))
-        hours = int((uptime % (24 * 3600)) // 3600)
-        minutes = int((uptime % 3600) // 60)
-        
-        return {
-            'uptime': f"{days}d {hours}h {minutes}m",
-            'total_exports': self.total_exports,
-            'successful_exports': self.successful_exports,
-            'failed_exports': self.failed_exports,
-            'success_rate': f"{(self.successful_exports / self.total_exports * 100):.1f}%" if self.total_exports > 0 else "N/A",
-            'total_messages': self.total_messages_processed,
-            'last_error': str(self.last_error) if self.last_error else None,
-            'maintenance_mode': self.is_maintenance_mode
-        }
-
-    def set_maintenance_mode(self, enabled: bool):
-        """Set maintenance mode"""
-        self.is_maintenance_mode = enabled
-
-# Initialize bot state
-bot_state = BotState()
-
-# Add to utility functions
 async def initialize():
     """Initialize bot with fresh state"""
     try:
