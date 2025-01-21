@@ -22,19 +22,19 @@ if os.getenv('RAILWAY_ENVIRONMENT'):
     print(f"Current directory: {os.getcwd()}")
     print(f"Available files: {os.listdir()}")
     print("Environment variables:")
-    for key in os.environ:
+    for key in sorted(os.environ.keys()):
         if 'TOKEN' in key or 'SECRET' in key:
             print(f"{key}: [hidden]")
         else:
             print(f"{key}: {os.environ[key]}")
-    
-    # Verify Discord token is set
-    if not os.getenv('DISCORD_TOKEN'):
-        print("ERROR: DISCORD_TOKEN not found in Railway variables!")
-        print("Please set the DISCORD_TOKEN variable in your Railway project settings.")
-        sys.exit(1)
-    print("Token verification successful")
-    print("===========================\n")
+
+# Get token directly from environment
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    print("ERROR: DISCORD_TOKEN not found!")
+    print("Please set the DISCORD_TOKEN variable in your Railway project settings.")
+    sys.exit(1)
+print("Token loaded successfully (token hidden for security)")
 
 # Load environment variables (only for local development)
 if not os.getenv('RAILWAY_ENVIRONMENT'):
@@ -128,14 +128,6 @@ class BotState:
 # Load environment variables (skip on Railway)
 if not os.getenv('RAILWAY_ENVIRONMENT'):
     load_dotenv(override=True)
-
-# Get token from environment
-TOKEN = os.getenv('DISCORD_TOKEN')
-if not TOKEN:
-    print("Error: Discord token not found!")
-    print("Make sure DISCORD_TOKEN is set in your environment variables")
-    sys.exit(1)
-print("Token loaded successfully (token hidden for security)")
 
 # Initialize bot state early
 bot_state = BotState()
