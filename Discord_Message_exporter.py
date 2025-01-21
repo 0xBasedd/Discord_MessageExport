@@ -821,7 +821,60 @@ async def estimate_message_count(channel: discord.TextChannel, role=None, after=
         logger.error(f"Error estimating message count: {e}")
         return 0
 
-# Add this helper function to handle pagination
+# After imports but before using memory_monitor
+class MemoryMonitor:
+    """Monitor memory usage and trigger cleanup when needed"""
+    def __init__(self, 
+                 warning_threshold=MEMORY_WARNING_THRESHOLD,
+                 critical_threshold=MEMORY_CRITICAL_THRESHOLD,
+                 trend_samples=MEMORY_TREND_SAMPLES):
+        self.warning_threshold = warning_threshold
+        self.critical_threshold = critical_threshold
+        self.last_check = time.time()
+        self.check_interval = MEMORY_CHECK_INTERVAL
+        self.trend_samples = trend_samples
+        self.memory_history = []
+
+    def check(self) -> tuple[bool, str]:
+        """Check memory usage and track trends"""
+        current_time = time.time()
+        if current_time - self.last_check < self.check_interval:
+            return True, ""
+            
+        self.last_check = current_time
+        memory = psutil.virtual_memory()
+        
+        # Add to history and keep last N samples
+        self.memory_history.append(memory.percent)
+        if len(self.memory_history) > self.trend_samples:
+            self.memory_history.pop(0)
+        
+        # Calculate trend
+        trend_increasing = len(self.memory_history) > 1 and all(
+            self.memory_history[i] < self.memory_history[i+1] 
+            for i in range(len(self.memory_history)-1)
+        )
+        
+        message = ""
+        if memory.percent >= self.critical_threshold:
+            clear_memory()
+            message = f"❌ Critical memory usage: {memory.percent}%"
+            return False, message
+        elif memory.percent >= self.warning_threshold:
+            message = f"⚠️ High memory usage: {memory.percent}%"
+            if trend_increasing:
+                message += " (Trending up ↗️)"
+                clear_memory()  # Preemptive cleanup
+            return True, message
+        elif trend_increasing and memory.percent >= self.warning_threshold * 0.8:
+            message = f"ℹ️ Memory usage trending up: {memory.percent}%"
+            
+        return True, message
+
+# Initialize memory monitor after class definition
+memory_monitor = MemoryMonitor()
+
+# Update the fetch function to not use memory monitor
 async def fetch_messages_with_pagination(channel, progress):
     """Fetch messages with pagination and filtering"""
     messages = []
@@ -836,13 +889,6 @@ async def fetch_messages_with_pagination(channel, progress):
                 # Update progress
                 await progress.update()
                 
-                # Check memory periodically
-                is_ok, warning = memory_monitor.check()
-                if not is_ok:
-                    raise MemoryError(warning)
-                elif warning:
-                    logger.warning(warning)
-                    
             except Exception as e:
                 logger.error(f"Error processing message {message.id}: {e}")
                 continue
@@ -968,12 +1014,28 @@ async def export(
 
         await progress_message.edit(content="Processing your request...")
         
+        # Check memory before starting
+        is_ok, warning = memory_monitor.check()
+        if not is_ok:
+            await progress_message.edit(content=f"❌ {warning}")
+            return
+        elif warning:
+            logger.warning(warning)
+
         # Fetch and process messages
         messages = await fetch_messages_with_pagination(channel, progress)
         
         # Process messages
         chunker = MessageChunker(chunk_size)
         for message_data in messages:
+            # Check memory periodically
+            is_ok, warning = memory_monitor.check()
+            if not is_ok:
+                await progress_message.edit(content=f"❌ {warning}")
+                return
+            elif warning:
+                logger.warning(warning)
+                
             await chunker.add_message(message_data, channel.name, format == "csv", progress_message)
             await progress.update(filtered=True)
             
@@ -1572,62 +1634,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Startup error: {e}")
         sys.exit(1)
-
-# Add to utility functions
-class MemoryMonitor:
-    """Monitor memory usage and trigger cleanup when needed"""
-    def __init__(self, 
-                 warning_threshold=MEMORY_WARNING_THRESHOLD,
-                 critical_threshold=MEMORY_CRITICAL_THRESHOLD,
-                 trend_samples=MEMORY_TREND_SAMPLES):
-        self.warning_threshold = warning_threshold
-        self.critical_threshold = critical_threshold
-        self.last_check = time.time()
-        self.check_interval = MEMORY_CHECK_INTERVAL  # Use config value
-        self.trend_samples = trend_samples
-        self.memory_history = []
-
-    def check(self) -> tuple[bool, str]:
-        """
-        Check memory usage and track trends
-        Returns: (is_ok, message)
-        """
-        current_time = time.time()
-        if current_time - self.last_check < self.check_interval:
-            return True, ""
-            
-        self.last_check = current_time
-        memory = psutil.virtual_memory()
-        
-        # Add to history and keep last N samples
-        self.memory_history.append(memory.percent)
-        if len(self.memory_history) > self.trend_samples:
-            self.memory_history.pop(0)
-        
-        # Calculate trend
-        trend_increasing = len(self.memory_history) > 1 and all(
-            self.memory_history[i] < self.memory_history[i+1] 
-            for i in range(len(self.memory_history)-1)
-        )
-        
-        message = ""
-        if memory.percent >= self.critical_threshold:
-            clear_memory()
-            message = f"❌ Critical memory usage: {memory.percent}%"
-            return False, message
-        elif memory.percent >= self.warning_threshold:
-            message = f"⚠️ High memory usage: {memory.percent}%"
-            if trend_increasing:
-                message += " (Trending up ↗️)"
-                clear_memory()  # Preemptive cleanup
-            return True, message
-        elif trend_increasing and memory.percent >= self.warning_threshold * 0.8:
-            message = f"ℹ️ Memory usage trending up: {memory.percent}%"
-            
-        return True, message
-
-# Initialize memory monitor
-memory_monitor = MemoryMonitor()
 
 # Add to utility functions
 def tail_file(filename: str, n: int) -> List[str]:
