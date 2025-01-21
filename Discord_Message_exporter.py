@@ -9,6 +9,23 @@ formatting, and data management capabilities.
 Licensed under MIT License
 """
 
+# Add at the very start of the file, before anything else
+import os
+import sys
+
+# Railway-specific startup check
+if os.getenv('RAILWAY_ENVIRONMENT'):
+    try:
+        print("\n=== Railway Startup Check ===")
+        print(f"Python executable: {sys.executable}")
+        print(f"Script path: {__file__}")
+        print(f"Working directory: {os.getcwd()}")
+        print(f"Files in directory: {os.listdir()}")
+        print("===========================\n")
+    except Exception as e:
+        print(f"Railway startup check failed: {e}")
+        sys.exit(1)
+
 # 1. IMPORTS
 import discord
 import os
@@ -88,11 +105,11 @@ def check_env_file():
     token = os.getenv('DISCORD_TOKEN')
     if not token:
         if os.getenv('RAILWAY_ENVIRONMENT'):
-            print("Error: Discord token not found in Railway environment!")
-            print("Please set DISCORD_TOKEN in Railway variables at:")
-            print("https://railway.app/project/[your-project]/variables")
-            print("Current environment:", os.environ.get('RAILWAY_ENVIRONMENT'))
-            print("Available variables:", list(os.environ.keys()))
+            print("\n=== Railway Environment Error ===")
+            print("Discord token not found in Railway variables!")
+            print("Available environment variables:")
+            print("\n".join(sorted([k for k in os.environ.keys() if not k.startswith('PATH')])))
+            print("=============================\n")
         else:
             print("Error: Discord token not found!")
             print("Make sure DISCORD_TOKEN is set in your environment variables")
@@ -107,6 +124,51 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
     TOKEN = check_env_file()
 print("Token loaded successfully (token hidden for security)")
+
+# Add Railway environment checks
+RAILWAY_MODE = bool(os.getenv('RAILWAY_ENVIRONMENT'))
+if RAILWAY_MODE:
+    print("\n=== Railway Environment Details ===")
+    print(f"Python version: {sys.version}")
+    print(f"Working directory: {os.getcwd()}")
+    print(f"Available directories: {os.listdir()}")
+    print(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('PATH')]}")
+    print(f"Discord.py version: {discord.__version__}")
+    print(f"Memory: {psutil.virtual_memory()}")
+    print("================================\n")
+
+    # Additional Railway-specific checks
+    try:
+        import pwd
+        print("\n=== Railway User Details ===")
+        print(f"Current user: {pwd.getpwuid(os.getuid()).pw_name}")
+        print(f"User home: {os.path.expanduser('~')}")
+        print(f"User permissions: {oct(os.stat('.').st_mode)[-3:]}")
+        print("===========================\n")
+    except ImportError:
+        print("pwd module not available")
+
+    # Check write permissions
+    try:
+        print("\n=== Railway Write Test ===")
+        test_file = "/tmp/write_test"
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print("Write test successful")
+        print("========================\n")
+    except Exception as e:
+        print(f"Write test failed: {e}")
+        print("Attempting fallback to user directory...")
+        try:
+            test_file = os.path.expanduser("~/write_test")
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            print("Fallback write test successful")
+        except Exception as e2:
+            print(f"Fallback write test failed: {e2}")
+            print("WARNING: Bot may have limited functionality")
 
 # Import config after environment setup
 try:
@@ -1185,15 +1247,11 @@ async def about(interaction: discord.Interaction):
 async def progress(interaction: discord.Interaction):
     """Show progress of current exports"""
     client = BotInstance.get_instance()
-    if not client:
-        await interaction.response.send_message("❌ Bot not initialized")
+    if not client._active_exports:
+        await interaction.response.send_message("No active exports")
         return
 
     try:
-        if not client._active_exports:
-            await interaction.response.send_message("No active exports")
-            return
-            
         progress_text = "**Active Exports**\n"
         for task in client._active_exports:
             if hasattr(task, 'user_id'):
@@ -1268,15 +1326,11 @@ async def commands(interaction: discord.Interaction):
 async def queue(interaction: discord.Interaction):
     """Show current export queue status"""
     client = BotInstance.get_instance()
-    if not client:
-        await interaction.response.send_message("❌ Bot not initialized")
+    if not client._active_exports:
+        await interaction.response.send_message("📭 Export queue is empty")
         return
 
     try:
-        if not client._active_exports:
-            await interaction.response.send_message("📭 Export queue is empty")
-            return
-            
         queue_text = "**Export Queue Status**\n"
         for i, task in enumerate(client._active_exports, 1):
             if hasattr(task, 'user_id'):
@@ -1794,3 +1848,16 @@ async def initialize():
     except Exception as e:
         logger.error(f"Initialization error: {e}")
         raise
+
+# Add after imports
+def handle_railway_error(error_msg: str):
+    """Handle Railway-specific errors"""
+    if os.getenv('RAILWAY_ENVIRONMENT'):
+        print("\n=== Railway Error ===")
+        print(error_msg)
+        print("Current environment:")
+        print(f"- Python: {sys.version}")
+        print(f"- Working dir: {os.getcwd()}")
+        print(f"- Files: {os.listdir()}")
+        print("===================\n")
+    sys.exit(1)
