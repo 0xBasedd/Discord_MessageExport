@@ -21,6 +21,16 @@ if os.getenv('RAILWAY_ENVIRONMENT'):
         print(f"Script path: {__file__}")
         print(f"Working directory: {os.getcwd()}")
         print(f"Files in directory: {os.listdir()}")
+        
+        # Verify file exists and is readable
+        script_path = os.path.join(os.getcwd(), 'Discord_Message_exporter.py')
+        if not os.path.exists(script_path):
+            print(f"ERROR: {script_path} not found!")
+            print("Available files:", os.listdir())
+            sys.exit(1)
+            
+        # Check file permissions
+        print(f"File permissions: {oct(os.stat(script_path).st_mode)[-3:]}")
         print("===========================\n")
     except Exception as e:
         print(f"Railway startup check failed: {e}")
