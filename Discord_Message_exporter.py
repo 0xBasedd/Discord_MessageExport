@@ -1538,73 +1538,66 @@ def signal_handler(sig, frame):
     """Handle shutdown signals"""
     logger.info("Shutdown signal received")
     try:
-        # Get or create event loop
+        # Try to get the running loop
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
+            # Schedule shutdown in the running loop
+            if not loop.is_closed():
+                loop.create_task(shutdown_handler())
         except RuntimeError:
+            # No running loop, create a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-
-        if loop.is_running():
-            # Schedule shutdown in the running loop
-            loop.create_task(shutdown_handler())
-        else:
-            # Run shutdown in new loop with timeout
-            try:
-                loop.run_until_complete(asyncio.wait_for(shutdown_handler(), timeout=10.0))
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.error(f"Shutdown timed out or failed: {e}")
+            loop.run_until_complete(shutdown_handler())
+            loop.close()
     except Exception as e:
         logger.error(f"Error in shutdown handler: {e}")
     finally:
-        sys.exit(0)  # Force exit after shutdown attempt
+        os._exit(0)
 
 async def shutdown_handler():
-    """Handle graceful shutdown with timeout"""
+    """Handle graceful shutdown"""
     try:
         logger.info("Shutting down bot...")
         client = BotInstance.get_instance()
         if client:
-            try:
-                # Save bot state
-                bot_state.save_state()
-                logger.info("Bot state saved")
-                
-                # Cancel active exports without recursion
-                active_exports = list(client._active_exports)  # Create a copy of the set
-                client._active_exports.clear()  # Clear the set first
-                for task in active_exports:
-                    try:
-                        if not task.done():
-                            task.cancel()
-                    except Exception as e:
-                        logger.error(f"Error cancelling task: {e}")
-                
-                # Clear memory
-                clear_memory()
-                
-                # Close aiohttp session
-                if client._session and not client._session.closed:
-                    try:
-                        await asyncio.wait_for(client._session.close(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        logger.warning("Session close timed out")
-                
-                # Close Discord connection
-                if not client.is_closed():
-                    try:
-                        await asyncio.wait_for(client.close(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        logger.warning("Client close timed out")
-                
-                logger.info("Shutdown complete")
-            except Exception as e:
-                logger.error(f"Error during shutdown sequence: {e}")
+            # Save state first
+            bot_state.save_state()
+            logger.info("Bot state saved")
+            
+            # Close session
+            if hasattr(client, '_session') and client._session and not client._session.closed:
+                await client._session.close()
+            
+            # Close client
+            if not client.is_closed():
+                await client.close()
+            
+            logger.info("Shutdown complete")
     except Exception as e:
-        logger.error(f"Critical error during shutdown: {e}")
+        logger.error(f"Cleanup error: {e}")
 
 # Update the atexit registration
-atexit.register(signal_handler, None, None)
+def cleanup_on_exit():
+    """Clean exit handler"""
+    try:
+        # Try to get the running loop
+        try:
+            loop = asyncio.get_running_loop()
+            if not loop.is_closed():
+                loop.run_until_complete(shutdown_handler())
+        except RuntimeError:
+            # No running loop, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(shutdown_handler())
+            loop.close()
+    except Exception as e:
+        logger.error(f"Exit cleanup error: {e}")
+    finally:
+        os._exit(0)
+
+atexit.register(cleanup_on_exit)
 
 # 16. RUN BOT
 if __name__ == "__main__":
