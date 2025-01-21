@@ -21,14 +21,14 @@ fi
 
 # Copy and set permissions
 echo "Copying bot file..."
-cp Discord_Message_exporter.py /app/bot.py
+cp Discord_Message_exporter.py /app/
 if [ $? -ne 0 ]; then
     echo "ERROR: Failed to copy bot file!"
     exit 1
 fi
 
 echo "Setting permissions..."
-chmod +x /app/bot.py
+chmod +x /app/Discord_Message_exporter.py
 if [ $? -ne 0 ]; then
     echo "ERROR: Failed to set permissions!"
     exit 1
@@ -37,4 +37,5 @@ fi
 # Run the bot
 echo "Starting bot..."
 echo "==========================="
-python3 -u /app/bot.py 
+cd /app
+python3 Discord_Message_exporter.py 

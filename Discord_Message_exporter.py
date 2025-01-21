@@ -18,22 +18,27 @@ import time  # Add this import
 
 # Early Railway check
 if os.getenv('RAILWAY_ENVIRONMENT'):
-    print("\n=== Railway Startup Check ===")
+    print("\n=== Railway Environment Check ===")
     print(f"Current directory: {os.getcwd()}")
     print(f"Available files: {os.listdir()}")
-    
-    # Check if file exists with .py extension
-    if not os.path.exists('Discord_Message_exporter.py'):
-        print("ERROR: Discord_Message_exporter.py not found!")
-        print("Files in directory:", os.listdir())
-        sys.exit(1)
+    print("Environment variables:")
+    for key in os.environ:
+        if 'TOKEN' in key or 'SECRET' in key:
+            print(f"{key}: [hidden]")
+        else:
+            print(f"{key}: {os.environ[key]}")
     
     # Verify Discord token is set
     if not os.getenv('DISCORD_TOKEN'):
         print("ERROR: DISCORD_TOKEN not found in Railway variables!")
+        print("Please set the DISCORD_TOKEN variable in your Railway project settings.")
         sys.exit(1)
     print("Token verification successful")
     print("===========================\n")
+
+# Load environment variables (only for local development)
+if not os.getenv('RAILWAY_ENVIRONMENT'):
+    load_dotenv(override=True)
 
 # 2. CONFIGURATION
 VERSION = "1.0.0"
