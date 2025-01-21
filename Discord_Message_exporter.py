@@ -1537,10 +1537,26 @@ async def maintenance(
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
     logger.info("Shutdown signal received")
-    asyncio.run(shutdown_handler())
-    sys.exit(0)
+    try:
+        # Get or create event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-# Move shutdown_handler up before signal handlers
+        if loop.is_running():
+            # Schedule shutdown in the running loop
+            loop.create_task(shutdown_handler())
+        else:
+            # Run shutdown in new loop
+            loop.run_until_complete(shutdown_handler())
+    except Exception as e:
+        logger.error(f"Error in shutdown handler: {e}")
+    finally:
+        # Don't exit here, let the atexit handler do it
+        pass
+
 async def shutdown_handler():
     """Handle graceful shutdown with timeout"""
     try:
@@ -1548,52 +1564,37 @@ async def shutdown_handler():
         client = BotInstance.get_instance()
         if client:
             try:
-                # Set timeout for shutdown process
-                async with asyncio.timeout(30):
-                    # Save bot state
-                    bot_state.save_state()
-                    logger.info("Bot state saved")
-                    
-                    # Cancel all active exports
-                    for task in client._active_exports.copy():
-                        try:
-                            task.cancel()
-                            logger.info(f"Cancelled export task for user {getattr(task, 'user_id', 'unknown')}")
-                        except Exception as e:
-                            logger.error(f"Error cancelling task: {e}")
-                    
-                    # Clear memory
-                    clear_memory()
-                    
-                    # Close aiohttp session
-                    if client._session and not client._session.closed:
-                        await client._session.close()
-                    
-                    # Close Discord connection
-                    if not client.is_closed():
-                        await client.close()
-                    
-                    logger.info("Shutdown complete")
-            except asyncio.TimeoutError:
-                logger.error("Shutdown timed out after 30 seconds")
-                bot_state.save_state()  # Try to save state even if timeout occurs
+                # Save bot state
+                bot_state.save_state()
+                logger.info("Bot state saved")
+                
+                # Cancel all active exports
+                for task in client._active_exports.copy():
+                    try:
+                        task.cancel()
+                    except Exception as e:
+                        logger.error(f"Error cancelling task: {e}")
+                client._active_exports.clear()
+                
+                # Clear memory
+                clear_memory()
+                
+                # Close aiohttp session
+                if client._session and not client._session.closed:
+                    await client._session.close()
+                
+                # Close Discord connection
+                if not client.is_closed():
+                    await client.close()
+                
+                logger.info("Shutdown complete")
             except Exception as e:
                 logger.error(f"Error during shutdown sequence: {e}")
-                bot_state.save_state()  # Try to save state even if error occurs
     except Exception as e:
         logger.error(f"Critical error during shutdown: {e}")
-        try:
-            bot_state.save_state()  # Final attempt to save state
-        except:
-            pass
-    finally:
-        # Force exit if something went wrong
-        sys.exit(1)
 
-# Add signal handlers after shutdown_handler is defined
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-atexit.register(lambda: asyncio.run(shutdown_handler()))
+# Update the atexit registration
+atexit.register(signal_handler, None, None)
 
 # 16. RUN BOT
 if __name__ == "__main__":
@@ -1765,7 +1766,6 @@ class StateFileManager:
             *[f"{self.filename}{self.backup_suffix}.{i}" 
               for i in range(1, self.backup_count + 1)]
         ]
-        
         for file in files_to_try:
             try:
                 if os.path.exists(file):
