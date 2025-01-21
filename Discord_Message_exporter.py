@@ -143,14 +143,15 @@ if RAILWAY_MODE:
         print(f"Available files: {os.listdir()}")
         
         # Verify we're running from the correct location
-        if not os.path.exists('Discord_Message_exporter.py'):
-            print("ERROR: Discord_Message_exporter.py not found!")
+        script_name = os.path.basename(__file__)  # Get the actual running script name
+        if not os.path.exists(script_name):
+            print(f"ERROR: {script_name} not found!")
             print("Files in directory:", os.listdir())
             sys.exit(1)
             
         # Check write permissions
         try:
-            test_file = "write_test"
+            test_file = os.path.join(os.getcwd(), "write_test")
             with open(test_file, 'w') as f:
                 f.write('test')
             os.remove(test_file)
