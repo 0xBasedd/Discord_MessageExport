@@ -814,79 +814,46 @@ async def estimate_message_count(channel: discord.TextChannel, role=None, after=
     """Estimate total messages for progress tracking"""
     try:
         count = 0
-        sample_size = 1000
-        async for msg in channel.history(limit=sample_size):
-            if role and not any(role == r for r in msg.author.roles):
-                continue
-            if after and msg.created_at < after:
-                continue
-            if before and msg.created_at > before:
-                continue
+        async for _ in channel.history(limit=None, after=after, before=before):
             count += 1
-        
-        if count == 0:
-            return 1000  # Default estimate if no messages found in sample
-            
-        # Estimate total based on sample
-        total_seconds = (before or datetime.now()) - (after or channel.created_at)
-        sample_seconds = timedelta(days=7)
-        ratio = total_seconds / sample_seconds
-        estimated_total = max(int(count * ratio), count)  # Never estimate less than what we counted
-        return min(estimated_total, 1000000)  # Cap at 1M for safety
+        return count
     except Exception as e:
-        logger.error(f"Error estimating messages: {e}")
-        return 1000  # Default fallback estimate
+        logger.error(f"Error estimating message count: {e}")
+        return 0
 
 # Add this helper function to handle pagination
-async def fetch_messages_with_pagination(channel, progress_tracker=None, max_retries=MAX_RETRIES, timeout=TIMEOUT):
+async def fetch_messages_with_pagination(channel, progress):
+    """Fetch messages with pagination and filtering"""
     messages = []
-    last_message_id = None
-    batch_count = 0
-    retry_count = 0
-    
-    while True:
-        try:
-            async with asyncio.timeout(timeout):
-                batch = await channel.history(
-                    limit=100,
-                    before=last_message_id and discord.Object(id=last_message_id)
-                ).flatten()
-            
-            retry_count = 0
-            
-            if not batch:
-                break
+    try:
+        async for message in channel.history(limit=None):
+            try:
+                # Process message
+                message_data = await create_message_data(message)
+                if message_data:
+                    messages.append(message_data)
                 
-            messages.extend(batch)
-            batch_count += 1
-            
-            if progress_tracker:
-                # Update progress for the batch
-                progress_tracker.count += len(batch)
-                await progress_tracker.update(force=True, batch_mode=True)
-            
-            last_message_id = batch[-1].id
-            await asyncio.sleep(min(2.0, RATE_LIMIT_DELAY * batch_count))
-            
-        except (asyncio.TimeoutError, discord.errors.HTTPException, aiohttp.ClientError) as e:
-            retry_count += 1
-            if retry_count >= max_retries:
-                if isinstance(e, asyncio.TimeoutError):
-                    raise ValueError(f"Operation timed out after {max_retries} retries")
-                elif isinstance(e, discord.errors.HTTPException):
-                    if e.code in [50001, 50013]:
-                        raise ValueError(f"Permission error: {str(e)}")
-                    elif e.code == 429:
-                        raise ValueError(f"Too many rate limits hit after {max_retries} retries")
-                raise ValueError(f"Error after {max_retries} retries: {str(e)}")
-            
-            wait_time = retry_count * 2 if isinstance(e, asyncio.TimeoutError) else retry_count
-            if isinstance(e, discord.errors.HTTPException) and e.code == 429:
-                wait_time = e.retry_after if hasattr(e, 'retry_after') else 5
-            
-            logger.warning(f"Error (attempt {retry_count}/{max_retries}), waiting {wait_time}s: {str(e)}")
-            await asyncio.sleep(wait_time)
-    
+                # Update progress
+                await progress.update()
+                
+                # Check memory periodically
+                is_ok, warning = memory_monitor.check()
+                if not is_ok:
+                    raise MemoryError(warning)
+                elif warning:
+                    logger.warning(warning)
+                    
+            except Exception as e:
+                logger.error(f"Error processing message {message.id}: {e}")
+                continue
+                
+    except Exception as e:
+        logger.error(f"Error fetching messages: {e}")
+        raise
+        
+    if not messages:
+        raise ValueError("No messages found matching the criteria")
+        
     return messages
 
 # 13. BOT INITIALIZATION
@@ -919,23 +886,19 @@ async def on_command_error(interaction: discord.Interaction, error: app_commands
         )
 
 # 15. SLASH COMMANDS
-@client.tree.command(name="export", description="Export messages to Excel/CSV format")
+@client.tree.command(name="export", description="Export channel messages")
 @app_commands.describe(
-    format="Choose export format (Excel or CSV)",
-    channel="Select channel to export from",
-    role="Primary role to filter messages",
-    category="Optional: Filter by channel category",
-    search="Optional: Search terms in messages",
-    date_from="Optional: Start date (YYYY-MM-DD)",
-    date_to="Optional: End date (YYYY-MM-DD)",
-    chunk_size="Optional: Messages per file (default: 10000)",
-    data_options="Optional: Additional data options (comma-separated numbers 1-6)"
+    format="Export format (excel/csv)",
+    channel="Channel to export from",
+    role="Role to filter by",
+    category="Category to filter by (optional)",
+    search="Search term (optional)",
+    date_from="Start date YYYY-MM-DD (optional)",
+    date_to="End date YYYY-MM-DD (optional)",
+    chunk_size="Messages per file (optional)",
+    data_options="Data fields to include (1-6, comma separated)"
 )
-@app_commands.choices(format=[
-    app_commands.Choice(name="Excel", value="excel"),
-    app_commands.Choice(name="CSV", value="csv")
-])
-@command_cooldown(10)  # 10 second cooldown
+@app_commands.checks.cooldown(1, 10.0)  # 1 use per 10 seconds
 async def export(
     interaction: discord.Interaction,
     format: Literal["excel", "csv"],
@@ -945,118 +908,91 @@ async def export(
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    chunk_size: Optional[int] = 10000,
+    chunk_size: Optional[int] = DEFAULT_CHUNK_SIZE,
     data_options: Optional[str] = None
 ):
-    if bot_state.is_maintenance_mode:
-        await interaction.response.send_message("🔧 Bot is currently in maintenance mode. Please try again later.")
-        return
+    """Export channel messages with filtering"""
+    try:
+        # Initial response
+        await interaction.response.send_message("🔄 Starting export...")
+        progress_message = await interaction.original_response()
 
-    task = asyncio.current_task()
-    
-    async with ExportCleanup(client, task):
-        try:
-            task.user_id = interaction.user.id
-            task.start_time = time.time()
-            client._active_exports.add(task)
-            
-            # Memory and cooldown checks
-            if not await client.check_memory():
-                await interaction.response.send_message("⚠️ Low memory available. Try smaller chunk size.")
-                return
+        if bot_state.is_maintenance_mode:
+            await progress_message.edit(content="🔧 Bot is currently in maintenance mode. Please try again later.")
+            return
 
-            if not await client.can_export():
-                await interaction.response.send_message("⏳ Please wait a few seconds between exports.")
-                return
+        # Verify permissions
+        if not channel.permissions_for(interaction.guild.me).read_message_history:
+            await progress_message.edit(content="❌ Bot lacks permission to read message history in this channel")
+            return
 
-            await interaction.response.send_message("Processing your request...")
-            message = await interaction.original_response()
-            
-            # Parse dates safely
-            start_date = None
-            end_date = None
-            if date_from:
-                try:
-                    start_date = datetime.strptime(date_from, '%Y-%m-%d')
-                except ValueError:
-                    await interaction.response.send_message("❌ Invalid start date format. Use YYYY-MM-DD")
-                    return
-                
-            if date_to:
-                try:
-                    end_date = datetime.strptime(date_to, '%Y-%m-%d')
-                except ValueError:
-                    await interaction.response.send_message("❌ Invalid end date format. Use YYYY-MM-DD")
-                    return
-            
-            if start_date and end_date and start_date > end_date:
-                await interaction.response.send_message("❌ Start date must be before end date")
-                return
-            
-            # Initialize progress tracker with estimated count
-            estimated_count = await estimate_message_count(channel, role, start_date, end_date)
-            progress = ProgressTracker(message, total=estimated_count or 1000)  # Fallback estimate
-            
-            # Initialize chunker
-            chunker = MessageChunker(chunk_size)
-            processed_count = 0
-            
+        # Process date range
+        after = None
+        before = None
+        if date_from:
             try:
-                # Fetch all messages with pagination
-                messages = await fetch_messages_with_pagination(channel, progress)
-                total_messages = len(messages)
+                after = datetime.strptime(date_from, '%Y-%m-%d')
+            except ValueError:
+                await progress_message.edit(content="❌ Invalid start date format. Use YYYY-MM-DD")
+                return
                 
-                if total_messages == 0:
-                    await message.edit(content="❌ No messages found in channel")
-                    return
-                
-                await message.edit(content=f"Processing {total_messages:,} messages...")
-                
-                # Process the fetched messages
-                for msg in messages:
-                    # Check memory periodically
-                    is_ok, warning_message = memory_monitor.check()
-                    if not is_ok:
-                        await warning_message.channel.send(warning_message)
-                        return
-                    elif warning_message:  # Warning message
-                        await warning_message.channel.send(warning_message)
-                    
-                    if not await process_message_filters(msg, role, category, channel, search, date_from, date_to):
-                        await progress.update(filtered=False)
-                        continue
-
-                    message_data = await create_message_data(msg, data_options)
-                    if message_data:
-                        await chunker.add_message(message_data, channel.name, format == "csv", message)
-                        processed_count += 1
-                        await progress.update(filtered=True)
-                    else:
-                        await progress.update(filtered=False)
-                
-                if processed_count == 0:
-                    await message.edit(content="❌ No messages matched the filters")
-                    return
-                
-                # Record successful export
-                bot_state.record_export(True, processed_count)
-                await message.edit(content=f"✅ Processed {processed_count:,} out of {total_messages:,} messages")
-                
-                # Save any remaining messages
-                await chunker.finish(channel.name, format == "csv", message)
-
-            except ValueError as e:
-                bot_state.last_error = str(e)
-                bot_state.record_export(False)
-                await message.channel.send(f"❌ Error: {str(e)}")
+        if date_to:
+            try:
+                before = datetime.strptime(date_to, '%Y-%m-%d')
+            except ValueError:
+                await progress_message.edit(content="❌ Invalid end date format. Use YYYY-MM-DD")
                 return
 
-        except Exception as e:
-            bot_state.last_error = str(e)
-            bot_state.record_export(False)
-            await message.channel.send(f"❌ Export failed: {str(e)}")
-            logger.error(f"Export error: {e}", exc_info=True)
-        finally:
+        # Verify date range
+        if after and before and after > before:
+            await progress_message.edit(content="❌ Start date must be before end date")
+            return
+
+        task = asyncio.current_task()
+        if task:
+            task.user_id = interaction.user.id
+            client._active_exports.add(task)
+
+        # Initialize progress tracker
+        estimated_count = await estimate_message_count(channel, role, after, before)
+        progress = ProgressTracker(progress_message, total=estimated_count)
+
+        # Memory and cooldown checks
+        if not await client.check_memory():
+            await progress_message.edit(content="⚠️ Low memory available. Try smaller chunk size.")
+            return
+
+        if not await client.can_export():
+            await progress_message.edit(content="⏳ Please wait a few seconds between exports.")
+            return
+
+        await progress_message.edit(content="Processing your request...")
+        
+        # Fetch and process messages
+        messages = await fetch_messages_with_pagination(channel, progress)
+        
+        # Process messages
+        chunker = MessageChunker(chunk_size)
+        for message_data in messages:
+            await chunker.add_message(message_data, channel.name, format == "csv", progress_message)
+            await progress.update(filtered=True)
+            
+        # Save remaining messages
+        await chunker.finish(channel.name, format == "csv", progress_message)
+
+    except app_commands.CommandOnCooldown as e:
+        await interaction.response.send_message(
+            f"⏳ Command on cooldown. Try again in {e.retry_after:.1f} seconds.",
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"❌ Export failed: {str(e)}")
+        else:
+            await interaction.followup.send(f"❌ Export failed: {str(e)}")
+    finally:
+        if task in client._active_exports:
             client._active_exports.discard(task)
 
 @client.tree.command(name="help", description="Show detailed help information")
