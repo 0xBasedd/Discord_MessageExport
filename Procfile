@@ -1,1 +1,1 @@
-worker: python3 -u run.py 
+worker: python3 -u Discord_Message_exporter.py 
