@@ -17,20 +17,27 @@ import sys
 if os.getenv('RAILWAY_ENVIRONMENT'):
     try:
         print("\n=== Railway Startup Check ===")
-        print(f"Python executable: {sys.executable}")
-        print(f"Script path: {__file__}")
-        print(f"Working directory: {os.getcwd()}")
-        print(f"Files in directory: {os.listdir()}")
+        script_name = 'Discord_Message_exporter.py'
+        script_link = 'Discord_Message_exporter'
         
-        # Verify file exists and is readable
-        script_path = os.path.join(os.getcwd(), 'Discord_Message_exporter.py')
-        if not os.path.exists(script_path):
-            print(f"ERROR: {script_path} not found!")
-            print("Available files:", os.listdir())
+        print(f"Python executable: {sys.executable}")
+        print(f"Working directory: {os.getcwd()}")
+        print(f"Available files: {os.listdir()}")
+        
+        # Check both script file and symlink
+        if not os.path.exists(script_name):
+            print(f"ERROR: Main script {script_name} not found!")
             sys.exit(1)
             
-        # Check file permissions
-        print(f"File permissions: {oct(os.stat(script_path).st_mode)[-3:]}")
+        # Create symlink if needed
+        if not os.path.exists(script_link):
+            try:
+                os.symlink(script_name, script_link)
+                print(f"Created symlink: {script_link} -> {script_name}")
+            except Exception as e:
+                print(f"Warning: Could not create symlink: {e}")
+        
+        print("Startup check complete")
         print("===========================\n")
     except Exception as e:
         print(f"Railway startup check failed: {e}")
