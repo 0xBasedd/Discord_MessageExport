@@ -1549,13 +1549,15 @@ def signal_handler(sig, frame):
             # Schedule shutdown in the running loop
             loop.create_task(shutdown_handler())
         else:
-            # Run shutdown in new loop
-            loop.run_until_complete(shutdown_handler())
+            # Run shutdown in new loop with timeout
+            try:
+                loop.run_until_complete(asyncio.wait_for(shutdown_handler(), timeout=10.0))
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.error(f"Shutdown timed out or failed: {e}")
     except Exception as e:
         logger.error(f"Error in shutdown handler: {e}")
     finally:
-        # Don't exit here, let the atexit handler do it
-        pass
+        sys.exit(0)  # Force exit after shutdown attempt
 
 async def shutdown_handler():
     """Handle graceful shutdown with timeout"""
@@ -1568,24 +1570,32 @@ async def shutdown_handler():
                 bot_state.save_state()
                 logger.info("Bot state saved")
                 
-                # Cancel all active exports
-                for task in client._active_exports.copy():
+                # Cancel active exports without recursion
+                active_exports = list(client._active_exports)  # Create a copy of the set
+                client._active_exports.clear()  # Clear the set first
+                for task in active_exports:
                     try:
-                        task.cancel()
+                        if not task.done():
+                            task.cancel()
                     except Exception as e:
                         logger.error(f"Error cancelling task: {e}")
-                client._active_exports.clear()
                 
                 # Clear memory
                 clear_memory()
                 
                 # Close aiohttp session
                 if client._session and not client._session.closed:
-                    await client._session.close()
+                    try:
+                        await asyncio.wait_for(client._session.close(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("Session close timed out")
                 
                 # Close Discord connection
                 if not client.is_closed():
-                    await client.close()
+                    try:
+                        await asyncio.wait_for(client.close(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("Client close timed out")
                 
                 logger.info("Shutdown complete")
             except Exception as e:
